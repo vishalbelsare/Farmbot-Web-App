@@ -1,7 +1,8 @@
 import React from "react";
 import { Center, Text3D } from "@react-three/drei";
+import { ThreeElements } from "@react-three/fiber";
 import { ASSETS, RenderOrder } from "../constants";
-import { MeshPhongMaterial } from "../components";
+import { MeshBasicMaterial } from "../components";
 
 export interface TextProps {
   children: React.ReactNode;
@@ -11,11 +12,40 @@ export interface TextProps {
   color: string;
   name?: string;
   visible?: boolean;
-  renderOrder?: RenderOrder;
+  renderOrder?: RenderOrder | number;
   thickness?: number;
+  depthTest?: boolean;
+  depthWrite?: boolean;
+  transparent?: boolean;
+  opacity?: number;
+  raycast?: ThreeElements["mesh"]["raycast"];
 }
 
-export const Text = (props: TextProps) => {
+const sameVector = (
+  prev: [number, number, number],
+  next: [number, number, number],
+) =>
+  prev[0] === next[0] &&
+  prev[1] === next[1] &&
+  prev[2] === next[2];
+
+export const textPropsEqual = (prev: TextProps, next: TextProps) =>
+  prev.children === next.children &&
+  prev.fontSize === next.fontSize &&
+  prev.color === next.color &&
+  prev.name === next.name &&
+  prev.visible === next.visible &&
+  prev.renderOrder === next.renderOrder &&
+  prev.thickness === next.thickness &&
+  prev.depthTest === next.depthTest &&
+  prev.depthWrite === next.depthWrite &&
+  prev.transparent === next.transparent &&
+  prev.opacity === next.opacity &&
+  prev.raycast === next.raycast &&
+  sameVector(prev.position, next.position) &&
+  sameVector(prev.rotation, next.rotation);
+
+const TextBase = (props: TextProps) => {
   return <Center
     name={props.name}
     visible={props.visible}
@@ -25,9 +55,17 @@ export const Text = (props: TextProps) => {
       font={ASSETS.fonts.cabinBold}
       size={props.fontSize}
       height={props.thickness || 0.01}
-      rotation={props.rotation}>
+      rotation={props.rotation}
+      raycast={props.raycast}>
       {props.children}
-      <MeshPhongMaterial color={props.color} />
+      <MeshBasicMaterial
+        color={props.color}
+        depthTest={props.depthTest}
+        depthWrite={props.depthWrite}
+        transparent={props.transparent ?? props.opacity !== undefined}
+        opacity={props.opacity} />
     </Text3D>
   </Center>;
 };
+
+export const Text = React.memo(TextBase, textPropsEqual);

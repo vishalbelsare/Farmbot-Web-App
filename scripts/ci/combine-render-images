@@ -1,0 +1,232 @@
+#!/usr/bin/env bun
+// @ts-nocheck
+const fs = require('fs');
+const path = require('path');
+const { chromium } = require('playwright');
+
+const requiredEnv = name => {
+    const value = process.env[name];
+    if (!value) {
+        console.error(`${name} is required`);
+        process.exit(1);
+    }
+    return value;
+};
+
+const outputName = requiredEnv('COMBINED_RENDER_IMAGE');
+const screenshotName = requiredEnv('SCREENSHOT_NAME');
+const fpsSamplesName = requiredEnv('FPS_SAMPLES_NAME');
+const sceneMetricsName = requiredEnv('SCENE_METRICS_NAME');
+const feCoverageName = requiredEnv('FE_COVERAGE_NAME');
+const fpsHistoryName = requiredEnv('FPS_HISTORY');
+const loadDurationName = requiredEnv('LOAD_DURATION_NAME');
+const renderImageScale = Number(process.env.COMBINED_RENDER_IMAGE_SCALE || 3);
+if (!Number.isFinite(renderImageScale) || renderImageScale <= 0) {
+    console.error('COMBINED_RENDER_IMAGE_SCALE must be a positive number');
+    process.exit(1);
+}
+const imagePath = name => `/tmp/${name}.png`;
+const imageData = filePath => {
+    const data = fs.readFileSync(filePath).toString('base64');
+    return `data:image/png;base64,${data}`;
+};
+
+const metricRow = name => [
+    [`${name} screenshot`, imagePath(`${screenshotName}_${name}`)],
+    [`${name} fps`, imagePath(`${fpsSamplesName}_${name}`)],
+    [`${name} metrics`, imagePath(`${sceneMetricsName}_${name}`)],
+];
+const actionScreenshotPaths = name => {
+    const prefix = `${screenshotName}_${name}_action_`;
+    if (!fs.existsSync('/tmp')) { return []; }
+    return fs.readdirSync('/tmp')
+        .filter(file => file.startsWith(prefix) && file.endsWith('.png'))
+        .sort((a, b) => {
+            const aIndex = Number(a.slice(prefix.length, -4));
+            const bIndex = Number(b.slice(prefix.length, -4));
+            return aIndex - bIndex;
+        })
+        .map(file => path.join('/tmp', file));
+};
+const screenshotCell = name => {
+    const actionPaths = actionScreenshotPaths(name);
+    return [
+        name.replace(/_/g, ' '),
+        actionPaths.length > 0
+            ? actionPaths
+            : imagePath(`${screenshotName}_${name}`),
+    ];
+};
+const rowSets = {
+    plots: [
+        metricRow('promo_xl'),
+        metricRow('app'),
+        metricRow('stress'),
+        metricRow('water'),
+        [
+            ['fe coverage', imagePath(feCoverageName)],
+            ['fps history', imagePath(fpsHistoryName)],
+            ['load duration', imagePath(loadDurationName)],
+        ],
+    ],
+    screenshots: [
+        [
+            screenshotCell('login'),
+            screenshotCell('os'),
+            screenshotCell('demo'),
+        ],
+        [
+            screenshotCell('password_reset'),
+            screenshotCell('404'),
+            screenshotCell('dropdown'),
+        ],
+        [
+            screenshotCell('lab'),
+            screenshotCell('greenhouse'),
+            screenshotCell('outdoor'),
+        ],
+        [
+            screenshotCell('featured_scene_objects_action_1'),
+            screenshotCell('featured_scene_objects_action_2'),
+            screenshotCell('featured_scene_objects_action_3'),
+        ],
+        [
+            screenshotCell('points'),
+            [],
+            [],
+        ],
+    ],
+};
+
+const escapeHtml = value => String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+const imageTag = filePath => `<img src="${imageData(filePath)}" />`;
+const cell = ([title, filePaths]) => {
+    if (!title && !filePaths) {
+        return '<div class="empty"></div>';
+    }
+    const paths = Array.isArray(filePaths) ? filePaths : [filePaths];
+    const existingPaths = paths.filter(filePath => filePath && fs.existsSync(filePath));
+    if (existingPaths.length === 0) {
+        const missingPath = paths.find(Boolean);
+        return `
+          <figure class="missing">
+            <figcaption>${escapeHtml(title)}</figcaption>
+            <div>Missing ${escapeHtml(path.basename(missingPath))}</div>
+          </figure>`;
+    }
+    const imageClass = existingPaths.length > 1 ? 'images multi-images' : 'images';
+    return `
+      <figure>
+        <figcaption>${escapeHtml(title)}</figcaption>
+        <div class="${imageClass}">${existingPaths.map(imageTag).join('')}</div>
+      </figure>`;
+};
+const html = rows => {
+    const rowHtml = rows
+        .map(row => `<section class="row">${row.map(cell).join('')}</section>`)
+        .join('');
+    return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #f6f8fa;
+      color: #24292f;
+      font-family: Arial, sans-serif;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .row:last-child { margin-bottom: 0; }
+    figure {
+      margin: 0;
+      padding: 12px;
+      min-width: 0;
+      overflow: auto;
+      background: #ffffff;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+    }
+    figcaption {
+      margin-bottom: 8px;
+      color: #57606a;
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    img {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: #ffffff;
+    }
+    .images {
+      display: grid;
+      gap: 8px;
+    }
+    .multi-images {
+      grid-auto-flow: column;
+      grid-auto-columns: minmax(0, 1fr);
+    }
+    .multi-images img {
+      object-fit: contain;
+    }
+    .missing div {
+      min-height: 160px;
+      display: grid;
+      place-items: center;
+      color: #8c959f;
+      border: 1px dashed #d0d7de;
+      background: #f6f8fa;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  ${rowHtml}
+</body>
+</html>`;
+};
+
+async function main() {
+    Object.keys(rowSets).forEach(key => {
+        const output = `/tmp/${outputName}_${key}.png`;
+        fs.mkdirSync(path.dirname(output), { recursive: true });
+    });
+    const browser = await chromium.launch({
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+        ],
+    });
+    try {
+        const page = await browser.newPage({
+            viewport: { width: 1800, height: 1200 },
+            deviceScaleFactor: renderImageScale,
+        });
+        for (const [key, rows] of Object.entries(rowSets)) {
+            const output = `/tmp/${outputName}_${key}.png`;
+            await page.setContent(html(rows), { waitUntil: 'load' });
+            await page.screenshot({ path: output, fullPage: true });
+            console.log(`COMBINED_RENDER_IMAGE=${output}`);
+        }
+    } finally {
+        await browser.close();
+    }
+}
+
+main().catch(error => {
+    console.error('Failed to combine render images:', error.message || error);
+    process.exitCode = 1;
+});

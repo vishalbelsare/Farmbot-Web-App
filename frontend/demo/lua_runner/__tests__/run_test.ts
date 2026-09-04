@@ -1,4 +1,5 @@
 import { runLua } from "../run";
+import { ParameterApplication } from "farmbot";
 
 describe("runLua()", () => {
   it("returns actions", () => {
@@ -14,11 +15,79 @@ describe("runLua()", () => {
       { type: "go_to_home", args: ["all"] },
       {
         type: "_move",
+        variables: [],
         args: [
           "[{\"kind\":\"axis_overwrite\",\"args\":{\"axis\":\"y\",\""
           + "axis_operand\":{\"kind\":\"numeric\",\"args\":{\"number\":1}}}}]",
         ],
       },
+    ]);
+  });
+
+  it("captures move variables", () => {
+    const variables: ParameterApplication[] = [{
+      kind: "parameter_application",
+      args: {
+        label: "Location",
+        data_value: {
+          kind: "coordinate",
+          args: { x: 1, y: 2, z: 3 },
+        },
+      },
+    }];
+    expect(runLua(0, "move{x = 1}", variables)[0])
+      .toEqual(expect.objectContaining({ variables }));
+  });
+
+  it("posts points through the api shim", () => {
+    const code = `
+    local created = api{
+      url = "/api/points",
+      method = "POST",
+      body = {
+        pointer_type = "GenericPointer",
+        name = "test",
+        x = 1,
+        y = 2,
+        z = 3,
+        radius = 4,
+        meta = {},
+      },
+    }
+    if created then
+      toast("created")
+    end
+    `;
+
+    expect(runLua(0, code, [])).toEqual([
+      {
+        type: "create_point",
+        args: [
+          "{\"pointer_type\":\"GenericPointer\",\"name\":\"test\",\"x\":1,"
+          + "\"y\":2,\"z\":3,\"radius\":4,\"meta\":[]}",
+        ],
+      },
+      { type: "send_message", args: ["info", "created", "toast"] },
+    ]);
+  });
+
+  it("reports unsupported point api methods", () => {
+    const code = `
+    local deleted = api{
+      url = "/api/points",
+      method = "DELETE",
+    }
+    if not deleted then
+      toast("not deleted", "error")
+    end
+    `;
+
+    expect(runLua(0, code, [])).toEqual([
+      {
+        type: "send_message",
+        args: ["error", "API call DELETE /api/points not implemented."],
+      },
+      { type: "send_message", args: ["error", "not deleted", "toast"] },
     ]);
   });
 });

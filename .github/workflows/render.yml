@@ -1,0 +1,351 @@
+name: render
+
+on:
+  workflow_call:
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: false
+
+env:
+  NOTIFY: ${{ github.ref_name == 'staging' }}
+  STAGING: ${{ github.ref_name == 'staging' }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  CACHE_KEY_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
+  FPS_METRICS_CACHE_KEY: fps-metrics-${{ github.ref_name }}
+  FPS_HISTORY_CACHE_KEY: fps-history-${{ github.ref_name }}
+  STAGING_FPS_METRICS_CACHE_KEY: fps-metrics-staging
+  STAGING_FPS_HISTORY_CACHE_KEY: fps-history-staging
+  FE_COVERAGE_CACHE_KEY: fe-coverage-p-${{ github.ref_name }}
+
+jobs:
+  render:
+    runs-on: gpu
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set render env
+        run: scripts/ci/export-render-env
+
+      - name: Set cache baseline
+        run: |
+          baseline_sha=$(git ls-remote origin refs/heads/staging | awk '{print $1}')
+          : "${baseline_sha:?Unable to determine staging SHA}"
+          echo "CACHE_BASELINE_SHA=$baseline_sha" >> "$GITHUB_ENV"
+
+      - name: Set up CI
+        uses: ./.github/actions/setup-ci
+        with:
+          rails-env: production
+
+      - name: Set render service hosts
+        run: |
+          runner_ip=$(ip route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
+          echo "Runner IP: $runner_ip"
+          sed -i "s/^API_HOST=.*/API_HOST=$runner_ip/" .env
+          sed -i "s/^MQTT_HOST=.*/MQTT_HOST=$runner_ip/" .env
+          sudo docker compose run --rm web bundle exec rails runner RmqConfigWriter.render
+
+      - name: Start services
+        run: |
+          sudo docker compose up -d
+          sudo docker compose ps
+
+      - name: Install Playwright tooling
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          export BUN_INSTALL="$HOME/.bun"
+          export PATH="$BUN_INSTALL/bin:$PATH"
+          export PLAYWRIGHT_BROWSERS_PATH=/tmp/playwright-browsers
+          echo "BUN_INSTALL=$BUN_INSTALL" >> "$GITHUB_ENV"
+          echo "$BUN_INSTALL/bin" >> "$GITHUB_PATH"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
+
+      - name: Set Playwright apt cache key
+        id: playwright_apt_cache_key
+        run: |
+          . /etc/os-release
+          echo "platform=${ID}-${VERSION_ID}-${{ runner.arch }}" >> "$GITHUB_OUTPUT"
+          echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Playwright apt downloads
+        id: playwright_apt_cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .cache/playwright-apt
+          key: playwright-apt-${{ steps.playwright_apt_cache_key.outputs.platform }}-${{ hashFiles('bun.lock') }}-${{ steps.playwright_apt_cache_key.outputs.week }}
+          restore-keys: |
+            playwright-apt-${{ steps.playwright_apt_cache_key.outputs.platform }}-${{ hashFiles('bun.lock') }}-
+            playwright-apt-${{ steps.playwright_apt_cache_key.outputs.platform }}-
+
+      - name: Configure Playwright apt download cache
+        run: |
+          sudo install -d -m 755 "$GITHUB_WORKSPACE/.cache/playwright-apt"
+          sudo install -d -o _apt -g root -m 700 "$GITHUB_WORKSPACE/.cache/playwright-apt/partial"
+          sudo tee /etc/apt/apt.conf.d/99-playwright-ci-cache >/dev/null <<EOF
+          Dir::Cache::archives "$GITHUB_WORKSPACE/.cache/playwright-apt";
+          Binary::apt::APT::Keep-Downloaded-Packages "true";
+          Binary::apt-get::APT::Keep-Downloaded-Packages "true";
+          APT::Update::Post-Invoke-Success {
+            "install -d -o _apt -g root -m 700 $GITHUB_WORKSPACE/.cache/playwright-apt/partial";
+          };
+          EOF
+
+      - name: Install cached Playwright system dependencies
+        id: install_cached_playwright_deps
+        run: |
+          shopt -s nullglob
+          packages=("$GITHUB_WORKSPACE/.cache/playwright-apt/"*.deb)
+          if [ "${#packages[@]}" -eq 0 ]; then
+            echo "installed=false" >> "$GITHUB_OUTPUT"
+          elif sudo dpkg -i "${packages[@]}"; then
+            echo "installed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "installed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install missing Playwright system dependencies
+        run: |
+          if [ "${{ steps.install_cached_playwright_deps.outputs.installed }}" != "true" ]; then
+            bun run playwright install-deps chromium
+          elif ! bun run playwright install-deps chromium --dry-run; then
+            bun run playwright install-deps chromium
+          fi
+
+      - name: Prepare Playwright apt cache
+        id: prepare_playwright_apt_cache
+        run: |
+          sudo chmod -R a+rX "$GITHUB_WORKSPACE/.cache/playwright-apt"
+          du -sh "$GITHUB_WORKSPACE/.cache/playwright-apt"
+          shopt -s nullglob
+          packages=("$GITHUB_WORKSPACE/.cache/playwright-apt/"*.deb)
+          if [ "${#packages[@]}" -gt 0 ]; then
+            echo "has_packages=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_packages=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save Playwright apt downloads
+        if: steps.playwright_apt_cache.outputs.cache-hit != 'true' && steps.prepare_playwright_apt_cache.outputs.has_packages == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .cache/playwright-apt
+          key: playwright-apt-${{ steps.playwright_apt_cache_key.outputs.platform }}-${{ hashFiles('bun.lock') }}-${{ steps.playwright_apt_cache_key.outputs.week }}
+
+      - name: Install Playwright Chromium
+        run: bun run playwright install chromium
+
+      - name: Set up GPU
+        run: |
+          sudo modprobe nvidia || true
+          sudo modprobe nvidia_uvm || true
+          ls -la /dev/nvidia* || true
+          nvidia-smi
+
+      - name: Wait for load
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:3000/promo" >/dev/null; then
+              echo "web is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "web did not become ready"
+          exit 1
+
+      - name: Wait for MQTT auth
+        run: |
+          admin_password=$(awk -F= '/^ADMIN_PASSWORD=/{print $2; exit}' .env)
+          for i in $(seq 1 90); do
+            if timeout 5s sudo docker compose exec -T mqtt rabbitmqctl authenticate_user admin "$admin_password" >/dev/null; then
+              echo "mqtt auth is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "mqtt auth did not become ready"
+          exit 1
+
+      - name: Restore branch metric history cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            /tmp/${{ env.SCENE_METRICS_NAME }}*.csv
+          key: ${{ env.FPS_METRICS_CACHE_KEY }}-${{ env.CACHE_BASELINE_SHA }}-${{ env.CACHE_KEY_SUFFIX }}
+          restore-keys: |
+            ${{ env.FPS_METRICS_CACHE_KEY }}-${{ env.CACHE_BASELINE_SHA }}-
+
+      - name: Restore metric history from artifact branch
+        id: restore_metric_history
+        run: |
+          if compgen -G "/tmp/$SCENE_METRICS_NAME*.csv" >/dev/null; then
+            echo "scene_metrics_found=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          scripts/ci/git-restore-artifact-branch-file "$SCENE_METRICS_NAME*.csv"
+          if compgen -G "/tmp/$SCENE_METRICS_NAME*.csv" >/dev/null; then
+            echo "scene_metrics_found=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore staging metric history cache fallback
+        if: steps.restore_metric_history.outputs.scene_metrics_found != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            /tmp/${{ env.SCENE_METRICS_NAME }}*.csv
+          key: ${{ env.STAGING_FPS_METRICS_CACHE_KEY }}-${{ env.CACHE_KEY_SUFFIX }}
+          restore-keys: |
+            ${{ env.STAGING_FPS_METRICS_CACHE_KEY }}-
+
+      - name: Restore branch FPS history cache
+        uses: actions/cache/restore@v6
+        with:
+          path: /tmp/${{ env.FPS_HISTORY }}.csv
+          key: ${{ env.FPS_HISTORY_CACHE_KEY }}-${{ env.CACHE_BASELINE_SHA }}-${{ env.CACHE_KEY_SUFFIX }}
+          restore-keys: |
+            ${{ env.FPS_HISTORY_CACHE_KEY }}-${{ env.CACHE_BASELINE_SHA }}-
+
+      - name: Restore FPS history from artifact branch
+        id: restore_fps_history
+        run: |
+          if [ -f "/tmp/$FPS_HISTORY.csv" ]; then
+            echo "fps_history_found=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          scripts/ci/git-restore-artifact-branch-file "$FPS_HISTORY.csv"
+          if [ -f "/tmp/$FPS_HISTORY.csv" ]; then
+            echo "fps_history_found=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore staging FPS history cache fallback
+        if: steps.restore_fps_history.outputs.fps_history_found != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: /tmp/${{ env.FPS_HISTORY }}.csv
+          key: ${{ env.STAGING_FPS_HISTORY_CACHE_KEY }}-${{ env.CACHE_KEY_SUFFIX }}
+          restore-keys: |
+            ${{ env.STAGING_FPS_HISTORY_CACHE_KEY }}-
+
+      - name: Restore frontend coverage value
+        if: always()
+        uses: actions/cache/restore@v6
+        with:
+          path: /tmp/${{ env.FE_COVERAGE_NAME }}.csv
+          key: ${{ env.FE_COVERAGE_CACHE_KEY }}-${{ env.CACHE_KEY_SUFFIX }}
+          restore-keys: |
+            ${{ env.FE_COVERAGE_CACHE_KEY }}-
+
+      - name: Restore frontend coverage history fallback
+        if: always()
+        run: |
+          [ -f "/tmp/$FE_COVERAGE_NAME.csv" ] && exit 0
+
+          scripts/ci/git-restore-artifact-branch-file "$FE_COVERAGE_NAME.csv"
+
+      - name: Run playwright
+        run: scripts/ci/run-playwright-render
+
+      - name: Track FPS value
+        run: scripts/ci/track-fps-history
+
+      - name: Plot metric CSVs
+        if: always()
+        run: |
+          for csv in /tmp/*.csv; do
+            [ -f "$csv" ] || continue
+            bun scripts/metric_plot.js "$csv"
+          done
+
+      - name: Combine plots
+        if: always()
+        run: |
+          bun scripts/ci/combine-render-images
+
+      - name: Save FPS metrics
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            /tmp/${{ env.SCENE_METRICS_NAME }}*.csv
+          key: ${{ env.FPS_METRICS_CACHE_KEY }}-${{ env.CACHE_BASELINE_SHA }}-${{ env.CACHE_KEY_SUFFIX }}
+
+      - name: Save FPS history
+        uses: actions/cache/save@v6
+        with:
+          path: /tmp/${{ env.FPS_HISTORY }}.csv
+          key: ${{ env.FPS_HISTORY_CACHE_KEY }}-${{ env.CACHE_BASELINE_SHA }}-${{ env.CACHE_KEY_SUFFIX }}
+
+      - name: View values
+        if: always()
+        run: |
+          echo $FPS_VALUE
+          echo $SCENE_METRICS
+
+      - name: Send notification
+        if: env.NOTIFY == 'true'
+        run: scripts/ci/send-notification "${FPS_VALUE} fps (${PERCENT_CHANGE}% change)"
+
+      - name: Upload source image artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: source images
+          path: |
+            /tmp/*.png
+            !/tmp/render_summary_plots.png
+            !/tmp/render_summary_screenshots.png
+          if-no-files-found: warn
+          compression-level: 0
+
+      - name: Upload summary plots image artifact
+        if: ${{ always() && (env.STAGING != 'true' || failure()) }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: render_summary_plots
+          path: |
+            /tmp/render_summary_plots.png
+          if-no-files-found: warn
+          compression-level: 0
+
+      - name: Upload summary screenshots image artifact
+        if: ${{ always() && (env.STAGING != 'true' || failure()) }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: render_summary_screenshots
+          path: |
+            /tmp/render_summary_screenshots.png
+          if-no-files-found: warn
+          compression-level: 0
+
+      - name: Upload csv artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: scene-metrics-csv
+          path: |
+            /tmp/*.csv
+          if-no-files-found: warn
+
+      - name: On failure
+        if: failure()
+        run: |
+          sudo docker compose ps || true
+          sudo docker compose logs --no-color --tail=500 || true
+
+      - name: Publish image links
+        if: success() && env.STAGING == 'true'
+        run: scripts/ci/git-publish-render-artifacts
+
+      - name: Send notification
+        if: success() && env.NOTIFY == 'true'
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ -n "${RENDER_SUMMARY_URLS:-}" ]; then
+            for URL in $RENDER_SUMMARY_URLS; do
+              NAME="$(basename "$URL" .png)"
+              scripts/ci/send-notification "<$URL|$NAME>"
+            done
+          else
+            scripts/ci/send-notification "<$RUN_URL|render summary>"
+          fi

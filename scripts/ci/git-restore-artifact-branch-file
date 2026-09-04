@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source_pattern="${1:?source path is required}"
+: "${ARTIFACT_BRANCH:?ARTIFACT_BRANCH is required}"
+: "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+
+restore_file() {
+  local source_path="$1"
+  local destination_path="/tmp/$source_path"
+  local download_path="${destination_path}.download"
+  local raw_url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ARTIFACT_BRANCH}/${source_path}"
+
+  mkdir -p "$(dirname "$destination_path")"
+  if curl --fail --location --silent --show-error \
+    --output "$download_path" "$raw_url"; then
+    mv "$download_path" "$destination_path"
+    echo "Restored $destination_path"
+  else
+    rm -f "$download_path"
+  fi
+}
+
+if [ "$source_pattern" = "${SCENE_METRICS_NAME:-scene_metrics}*.csv" ]; then
+  while IFS=$'\034' read -r name mode _; do
+    if [ "$mode" = "fps" ]; then
+      restore_file "${SCENE_METRICS_NAME:-scene_metrics}_${name}.csv"
+    fi
+  done < <(scripts/ci/render-url-records scripts/ci/render-urls.json)
+else
+  restore_file "$source_pattern"
+fi

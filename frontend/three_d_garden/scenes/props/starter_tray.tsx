@@ -8,7 +8,7 @@ import {
   Quaternion,
   Vector3,
 } from "three";
-import { ASSETS, RenderOrder } from "../../constants";
+import { RenderOrder } from "../../constants";
 import {
   BoxGeometry,
   Group,
@@ -18,33 +18,98 @@ import {
   PlaneGeometry,
 } from "../../components";
 import { range } from "lodash";
+import {
+  GENERIC_PLANT_ICON,
+  getPlantIconTexture,
+  getPlantIconTextureUrl,
+  type PlantIconAtlas,
+} from "../../garden/plant_icon_atlas";
 
-const length = 250;
-const width = 700;
-const height = 50;
 const cellSize = 50;
 const seedlingSize = 40;
-const trayCells = range(5).flatMap(row =>
-  range(14).map(col => ({
-    x: -width / 2 + cellSize / 2 + col * cellSize,
-    y: -length / 2 + cellSize / 2 + row * cellSize,
-  })));
+
+interface StarterTrayDimensions {
+  width: number;
+  length: number;
+  height: number;
+  seedlingSize: number;
+}
 
 export interface StarterTraysProps {
   positions: [number, number, number][];
+  plantIconAtlas?: PlantIconAtlas;
+  dimensions: StarterTrayDimensions;
 }
 
-export const StarterTrays = (props: StarterTraysProps) => {
+const sameDimensions = (
+  prev: StarterTrayDimensions,
+  next: StarterTrayDimensions,
+) =>
+  prev === next || (
+    prev.width === next.width &&
+    prev.length === next.length &&
+    prev.height === next.height &&
+    prev.seedlingSize === next.seedlingSize);
+
+const samePositions = (
+  prev: StarterTraysProps["positions"],
+  next: StarterTraysProps["positions"],
+) =>
+  prev.length === next.length &&
+  prev.every((position, index) =>
+    position[0] === next[index][0] &&
+    position[1] === next[index][1] &&
+    position[2] === next[index][2]);
+
+export const starterTraysPropsEqual = (
+  prev: StarterTraysProps,
+  next: StarterTraysProps,
+) =>
+  samePositions(prev.positions, next.positions) &&
+  prev.plantIconAtlas === next.plantIconAtlas &&
+  sameDimensions(prev.dimensions, next.dimensions);
+
+const tileCells = (dimensions: StarterTrayDimensions) => {
+  const cols = Math.max(1, Math.floor(dimensions.width / cellSize));
+  const rows = Math.max(1, Math.floor(dimensions.length / cellSize));
+  return range(rows).flatMap(row =>
+    range(cols).map(col => ({
+      x: -(cols - 1) * cellSize / 2 + col * cellSize,
+      y: -(rows - 1) * cellSize / 2 + row * cellSize,
+    })));
+};
+
+const StarterTraysBase = (props: StarterTraysProps) => {
+  return props.positions.length == 0
+    ? <></>
+    : <EnabledStarterTrays {...props} />;
+};
+
+const EnabledStarterTrays = (props: StarterTraysProps) => {
   // eslint-disable-next-line no-null/no-null
   const trayRef = React.useRef<InstancedMeshType>(null);
   // eslint-disable-next-line no-null/no-null
   const seedlingRef = React.useRef<InstancedMeshType>(null);
-  const plantTexture = useTexture(ASSETS.other.plant);
+  const plantTextureUrl = getPlantIconTextureUrl(
+    GENERIC_PLANT_ICON, props.plantIconAtlas);
+  const basePlantTexture = useTexture(plantTextureUrl);
+  const plantTexture = React.useMemo(() =>
+    getPlantIconTexture(basePlantTexture, GENERIC_PLANT_ICON,
+      props.plantIconAtlas), [
+    basePlantTexture, props.plantIconAtlas,
+  ]);
   const matrix = React.useMemo(() => new Matrix4(), []);
   const position = React.useMemo(() => new Vector3(), []);
-  const scale = React.useMemo(() => new Vector3(), []);
+  const scaleVector = React.useMemo(() => new Vector3(), []);
   const trayQuaternion = React.useMemo(() => new Quaternion(), []);
   const seedlingQuaternion = React.useMemo(() => new Quaternion(), []);
+  const parentQuaternion = React.useMemo(() => new Quaternion(), []);
+  const lastCameraQuaternion = React.useMemo(() => new Quaternion(), []);
+  const lastParentQuaternion = React.useMemo(() => new Quaternion(), []);
+  const seedlingMatrixNeedsUpdate = React.useRef(true);
+  const hasCameraQuaternion = React.useRef(false);
+  const dimensions = props.dimensions;
+  const trayCells = React.useMemo(() => tileCells(dimensions), [dimensions]);
 
   React.useEffect(() => {
     const mesh = trayRef.current;
@@ -53,33 +118,59 @@ export const StarterTrays = (props: StarterTraysProps) => {
       position.set(
         trayPosition[0],
         trayPosition[1],
-        trayPosition[2] + height / 2,
+        trayPosition[2] + dimensions.height / 2,
       );
-      scale.set(1, 1, 1);
-      matrix.compose(position, trayQuaternion, scale);
+      scaleVector.set(1, 1, 1);
+      matrix.compose(position, trayQuaternion, scaleVector);
       mesh.setMatrixAt(index, matrix);
     });
     mesh.instanceMatrix.needsUpdate = true;
-  }, [matrix, position, props.positions, scale, trayQuaternion]);
+  }, [dimensions.height, matrix, position, props.positions, scaleVector,
+    trayQuaternion]);
+
+  React.useEffect(() => {
+    seedlingMatrixNeedsUpdate.current = true;
+  }, [dimensions, props.positions]);
 
   useFrame(state => {
     const mesh = seedlingRef.current;
     if (!mesh) { return; }
-    seedlingQuaternion.copy(state.camera.quaternion);
-    scale.set(seedlingSize, seedlingSize, seedlingSize);
+    mesh.parent?.getWorldQuaternion(parentQuaternion);
+    const cameraChanged = !hasCameraQuaternion.current
+      || !lastCameraQuaternion.equals(state.camera.quaternion);
+    const parentChanged = !hasCameraQuaternion.current
+      || !lastParentQuaternion.equals(parentQuaternion);
+    if (!seedlingMatrixNeedsUpdate.current
+      && !cameraChanged
+      && !parentChanged) {
+      return;
+    }
+    seedlingQuaternion
+      .copy(parentQuaternion)
+      .invert()
+      .multiply(state.camera.quaternion);
+    scaleVector.set(
+      dimensions.seedlingSize,
+      dimensions.seedlingSize,
+      dimensions.seedlingSize,
+    );
     props.positions.forEach((trayPosition, trayIndex) => {
       trayCells.forEach((cell, cellIndex) => {
         const index = trayIndex * trayCells.length + cellIndex;
         position.set(
           trayPosition[0] + cell.x,
           trayPosition[1] + cell.y,
-          trayPosition[2] + height + seedlingSize / 2,
+          trayPosition[2] + dimensions.height + dimensions.seedlingSize / 2,
         );
-        matrix.compose(position, seedlingQuaternion, scale);
+        matrix.compose(position, seedlingQuaternion, scaleVector);
         mesh.setMatrixAt(index, matrix);
       });
     });
     mesh.instanceMatrix.needsUpdate = true;
+    lastCameraQuaternion.copy(state.camera.quaternion);
+    lastParentQuaternion.copy(parentQuaternion);
+    hasCameraQuaternion.current = true;
+    seedlingMatrixNeedsUpdate.current = false;
   });
 
   return <Group name={"starter-trays"}>
@@ -91,7 +182,12 @@ export const StarterTrays = (props: StarterTraysProps) => {
       castShadow={true}
       receiveShadow={true}
       frustumCulled={false}>
-      <BoxGeometry args={[width, length, height]} />
+      <BoxGeometry
+        args={[
+          dimensions.width,
+          dimensions.length,
+          dimensions.height,
+        ]} />
       <MeshPhongMaterial color={"#434343"} side={DoubleSide} />
     </InstancedMesh>
     <InstancedMesh
@@ -110,9 +206,37 @@ export const StarterTrays = (props: StarterTraysProps) => {
   </Group>;
 };
 
-export const StarterTray = () => {
+export const StarterTrays = React.memo(
+  StarterTraysBase,
+  starterTraysPropsEqual,
+);
+
+export interface StarterTrayProps {
+  plantIconAtlas?: PlantIconAtlas;
+  size: [number, number, number];
+}
+
+export const StarterTray = (props: StarterTrayProps) => {
+  const dimensions = React.useMemo(() => {
+    const effectiveSeedlingSize = Math.max(
+      1,
+      Math.min(seedlingSize, props.size[2] - 1),
+    );
+    return {
+      width: props.size[0],
+      length: props.size[1],
+      height: props.size[2] - effectiveSeedlingSize,
+      seedlingSize: effectiveSeedlingSize,
+    };
+  }, [props.size]);
+  const centerOffset = props.size[2] / 2;
 
   return <Group name={"starter-tray"}>
-    <StarterTrays positions={[[0, 0, 0]]} />
+    <Group position={[0, 0, -centerOffset]}>
+      <StarterTrays
+        positions={[[0, 0, 0]]}
+        plantIconAtlas={props.plantIconAtlas}
+        dimensions={dimensions} />
+    </Group>
   </Group>;
 };

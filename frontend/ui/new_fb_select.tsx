@@ -18,6 +18,10 @@ export interface FBSelectProps {
   customNullLabel?: string;
   /** Optionally filter the list with access to the current search query. */
   itemListFilter?: (items: DropDownItem[], query: string) => DropDownItem[];
+  /** Match the open menu width to the select target width. */
+  matchTargetWidth?: boolean;
+  usePortal?: boolean;
+  title?: string;
 }
 
 export class FBSelect extends React.Component<FBSelectProps, {}> {
@@ -53,8 +57,11 @@ export class FBSelect extends React.Component<FBSelectProps, {}> {
         selectedItem={this.item}
         items={this.list}
         itemListFilter={this.props.itemListFilter}
+        matchTargetWidth={this.props.matchTargetWidth}
         onChange={this.props.onChange}
-        nullChoice={this.NULL_CHOICE} />
+        usePortal={this.props.usePortal}
+        nullChoice={this.NULL_CHOICE}
+        title={this.props.title} />
     </div>;
   }
 }

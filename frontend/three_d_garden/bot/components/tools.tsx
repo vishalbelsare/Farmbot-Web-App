@@ -1,25 +1,21 @@
 import React from "react";
 import * as THREE from "three";
-import { useGLTF } from "@react-three/drei";
-import {
-  get3DPositionFunc,
-  get3DPositionNoMirrorFunc,
-  threeSpace,
-  zDir as zDirFunc,
-  zZero as zZeroFunc,
-} from "../../helpers";
+import { useGLTF, useTexture } from "@react-three/drei";
+import { threeSpace } from "../../helpers";
 import { Config, PositionConfig } from "../../config";
 import type { GLTF } from "three-stdlib";
 import {
-  ASSETS, HOVER_OBJECT_MODES, LIB_DIR, PartName, SeedTroughAssemblyMaterial,
+  ASSETS, HOVER_OBJECT_MODES, LIB_DIR, PartName, RenderOrder,
+  SeedTroughAssemblyMaterial,
 } from "../../constants";
 import {
   SoilSensorFull, SoilSensorModel,
   SeedTroughAssemblyFull, SeedTroughAssemblyModel,
   SeedTroughHolderFull, SeedTroughHolderModel,
 } from "../parts";
-import { Group, Mesh, MeshPhongMaterial } from "../../components";
-import { distinguishableBlack, utmHeight } from "../bot";
+import {
+  Group, Mesh, MeshBasicMaterial, MeshPhongMaterial, PlaneGeometry,
+} from "../../components";
 import { SlotWithTool } from "../../../resources/interfaces";
 import { isUndefined, sortBy } from "lodash";
 import {
@@ -29,17 +25,39 @@ import { Xyz } from "farmbot";
 import { ToolPulloutDirection } from "farmbot/dist/resources/api_resources";
 import { useNavigate } from "react-router";
 import { Path } from "../../../internal_urls";
-import { setPanelOpen } from "../../../farm_designer/panel_header";
+import { setPanelOpen3D } from "../../panel_actions";
 import { getMode } from "../../../farm_designer/map/util";
+import { Mode } from "../../../farm_designer/map/interfaces";
 import { PROMO_TOOLS } from "../../../promo/tools";
-import { useFrame } from "@react-three/fiber";
+import { ThreeEvent, useFrame } from "@react-three/fiber";
 import { Model, ModelMesh } from "../../model_mesh";
-import { SuctionAnimation } from "./suction_animation";
+import { SuctionAnimations } from "./suction_animation";
+import { Highlight } from "../../elements";
+import {
+  ThreeDObjectHoverHandler, ThreeDObjectHoverLabelHandler,
+  ThreeDObjectSelection,
+  ThreeDObjectSelectionHandler,
+} from "../../selection_types";
+import {
+  getToolPositionHelpers, getToolRenderPosition, ToolPositionHelpers,
+} from "./tool_slot_position";
+import { clickWasDragged } from "../../click_event";
+import { getBotKinematics } from "../kinematics";
+import { getBotVersion } from "../bot_versions";
+import { frontSideMaterial } from "../../geometry_batching";
+
+const distinguishableBlack = "#333";
 
 type Toolbay3 = GLTF & {
   nodes: {
     [PartName.toolbay3]: THREE.Mesh;
     [PartName.toolbay3Logo]: THREE.Mesh;
+  };
+  materials: never;
+}
+type Toolbay5 = GLTF & {
+  nodes: {
+    [PartName.toolbay5]: THREE.Mesh;
   };
   materials: never;
 }
@@ -82,7 +100,14 @@ export interface ToolsProps {
   mountedToolName?: string | undefined;
   dispatch?: Function;
   getZ(x: number, y: number): number;
+  onSelectObject?: ThreeDObjectSelectionHandler;
+  onHoverObject?: ThreeDObjectHoverHandler;
+  onToolSlotHoverObject?: ThreeDObjectHoverHandler;
+  onHoverLabel?: ThreeDObjectHoverLabelHandler;
+  frame?: "all" | ToolMountFrame;
 }
+
+export type ToolMountFrame = "stationary" | "gantry" | "z-axis";
 
 export interface ThreeDTool {
   id?: number | undefined;
@@ -93,7 +118,55 @@ export interface ThreeDTool {
   toolPulloutDirection: ToolPulloutDirection;
   firstTrough?: boolean;
   gantryMounted?: boolean;
+  mountFrame: ToolMountFrame;
 }
+
+const TOOLS_CONFIG_FIELDS: (keyof Config)[] = [
+  "bedLengthOuter",
+  "bedWallThickness",
+  "bedWidthOuter",
+  "bedXOffset",
+  "bedYOffset",
+  "botSizeX",
+  "columnLength",
+  "kitVersion",
+  "mirrorX",
+  "mirrorY",
+  "negativeZ",
+  "rotary",
+  "sizePreset",
+  "tool",
+  "vacuum",
+  "zGantryOffset",
+];
+
+const toolPositionsEqual = (prev: ToolsProps, next: ToolsProps) => {
+  const frame = prev.frame || "all";
+  if (frame == "all") {
+    return prev.configPosition.x === next.configPosition.x &&
+      prev.configPosition.y === next.configPosition.y &&
+      prev.configPosition.z === next.configPosition.z;
+  }
+  if (frame == "gantry" && prev.config.mirrorX) {
+    return prev.configPosition.x === next.configPosition.x;
+  }
+  return true;
+};
+
+export const toolsPropsEqual = (prev: ToolsProps, next: ToolsProps) => {
+  return prev.toolSlots === next.toolSlots &&
+    prev.mountedToolName === next.mountedToolName &&
+    prev.dispatch === next.dispatch &&
+    prev.getZ === next.getZ &&
+    prev.onSelectObject === next.onSelectObject &&
+    prev.onHoverObject === next.onHoverObject &&
+    prev.onToolSlotHoverObject === next.onToolSlotHoverObject &&
+    prev.onHoverLabel === next.onHoverLabel &&
+    prev.frame === next.frame &&
+    toolPositionsEqual(prev, next) &&
+    TOOLS_CONFIG_FIELDS.every(field =>
+      prev.config[field] === next.config[field]);
+};
 
 export const convertSlotsWithTools =
   (slotsWithTools: SlotWithTool[]): ThreeDTool[] => {
@@ -110,14 +183,95 @@ export const convertSlotsWithTools =
         toolPulloutDirection: swt.toolSlot.body.pullout_direction,
         firstTrough: troughIndex < 2,
         gantryMounted: swt.toolSlot.body.gantry_mounted,
+        mountFrame: swt.toolSlot.body.gantry_mounted
+          ? "gantry"
+          : "stationary",
       };
     });
   };
 
-export const Tools = (props: ToolsProps) => {
+interface PromoToolbay3Props {
+  config: Config;
+  local?: boolean;
+}
+
+const PromoToolbay3 = (props: PromoToolbay3Props) => {
   const {
     bedLengthOuter, bedWidthOuter, bedWallThickness,
   } = props.config;
+  const toolbay3 = useGLTF(ASSETS.models.toolbay3, LIB_DIR) as unknown as Toolbay3;
+  return <Group name={"toolbay3"}>
+    {((props.config.sizePreset == "Jr") ? [0] : [-200, 200]).map(yPosition =>
+      <Group key={yPosition}>
+        {[
+          { node: PartName.toolbay3, color: distinguishableBlack, id: "toolbay3" },
+          { node: PartName.toolbay3Logo, color: "white", id: "toolbay3Logo" },
+        ].map(part =>
+          <Mesh name={part.id} key={part.id}
+            position={props.local
+              ? [
+                105 + bedWallThickness - props.config.bedXOffset,
+                yPosition + bedWidthOuter / 2 - props.config.bedYOffset,
+                50,
+              ]
+              : [
+                threeSpace(105 + bedWallThickness, bedLengthOuter),
+                threeSpace(yPosition + bedWidthOuter / 2, bedWidthOuter),
+                50,
+              ]}
+            rotation={[0, 0, -Math.PI / 2]}
+            scale={1000}
+            geometry={
+              toolbay3.nodes[part.node as keyof Toolbay3["nodes"]].geometry}>
+            <MeshPhongMaterial color={part.color} />
+          </Mesh>)}
+      </Group>)}
+  </Group>;
+};
+
+const PromoToolbay5 = (props: PromoToolbay3Props) => {
+  const {
+    bedLengthOuter, bedWidthOuter, bedWallThickness,
+  } = props.config;
+  const toolbay5 = useGLTF(ASSETS.models.toolbay5, LIB_DIR) as unknown as Toolbay5;
+  const logoTexture = useTexture(ASSETS.other.farmbotLogo);
+  return <Group name={"toolbay5"}
+    position={props.local
+      ? [
+        105 + bedWallThickness - props.config.bedXOffset,
+        bedWidthOuter / 2 - props.config.bedYOffset,
+        50,
+      ]
+      : [
+        threeSpace(105 + bedWallThickness, bedLengthOuter),
+        threeSpace(bedWidthOuter / 2, bedWidthOuter),
+        50,
+      ]}
+    rotation={[0, 0, -Math.PI / 2]}>
+    <Mesh name={"toolbay5"}
+      scale={1000}
+      geometry={toolbay5.nodes[PartName.toolbay5].geometry}>
+      <MeshPhongMaterial color={distinguishableBlack} />
+    </Mesh>
+    <Mesh name={"toolbay5Logo"}
+      position={[0, -66, -20]}
+      rotation={[Math.PI / 4, 0, 0]}
+      renderOrder={RenderOrder.plantLabels}
+      raycast={() => undefined}>
+      <PlaneGeometry args={[77, 77 * 274 / 595]} />
+      <MeshBasicMaterial
+        map={logoTexture}
+        transparent={true}
+        alphaTest={0.1}
+        depthWrite={false}
+        toneMapped={false}
+        side={THREE.DoubleSide} />
+    </Mesh>
+  </Group>;
+};
+
+const ToolsBase = (props: ToolsProps) => {
+  const frame = props.frame || "all";
   const mirroredBotX = props.config.mirrorX
     ? props.config.botSizeX - props.configPosition.x
     : props.configPosition.x;
@@ -125,47 +279,59 @@ export const Tools = (props: ToolsProps) => {
     ? props.config.tool
     : reduceToolName(props.mountedToolName);
 
-  const toolbay3 = useGLTF(ASSETS.models.toolbay3, LIB_DIR) as unknown as Toolbay3;
-
-  const tools = isUndefined(props.toolSlots)
+  const configuredTools = React.useMemo(
+    () => isUndefined(props.toolSlots)
+      ? undefined
+      : convertSlotsWithTools(props.toolSlots),
+    [props.toolSlots]);
+  const tools = isUndefined(configuredTools)
     ? PROMO_TOOLS(props.config, props.configPosition)
-    : convertSlotsWithTools(props.toolSlots);
+    : configuredTools;
+  const positionHelpers =
+    React.useMemo(() => getToolPositionHelpers(props.config), [props.config]);
+
+  const visibleTools = frame == "all"
+    ? tools
+    : tools.filter(tool => tool.mountFrame == frame);
+  const showMountedTool = frame == "all" || frame == "z-axis";
+  const showStationaryToolbay = frame == "all" || frame == "stationary";
+  const version = getBotVersion(props.config.kitVersion);
 
   return <Group name={"tools"}>
-    <Tool
-      {...props}
+    {showMountedTool && <Tool
+      config={props.config}
+      botPosition={props.configPosition}
+      dispatch={props.dispatch}
+      onSelectObject={props.onSelectObject}
+      onHoverObject={props.onHoverObject}
+      onToolSlotHoverObject={props.onToolSlotHoverObject}
+      positionHelpers={positionHelpers}
       mountedToolName={mountedToolName}
       x={props.configPosition.x}
       y={props.configPosition.y}
       z={props.configPosition.z + (isUndefined(props.toolSlots) ? 1 : -2)}
       toolName={mountedToolName}
       toolPulloutDirection={ToolPulloutDirection.NONE}
-      inToolbay={false} />
-    {isUndefined(props.toolSlots) && <Group name={"toolbay3"}>
-      {((props.config.sizePreset == "Jr") ? [0] : [-200, 200]).map(yPosition =>
-        <Group key={yPosition}>
-          {[
-            { node: PartName.toolbay3, color: distinguishableBlack, id: "toolbay3" },
-            { node: PartName.toolbay3Logo, color: "white", id: "toolbay3Logo" },
-          ].map(part =>
-            <Mesh name={part.id} key={part.id}
-              position={[
-                threeSpace(105 + bedWallThickness, bedLengthOuter),
-                threeSpace(yPosition + bedWidthOuter / 2, bedWidthOuter),
-                50,
-              ]}
-              rotation={[0, 0, -Math.PI / 2]}
-              scale={1000}
-              geometry={
-                toolbay3.nodes[part.node as keyof Toolbay3["nodes"]].geometry}>
-              <MeshPhongMaterial color={part.color} />
-            </Mesh>)}
-        </Group>)}
-    </Group>}
-    {tools.map((tool, i) =>
+      mountFrame={"z-axis"}
+      renderFrame={frame}
+      onHoverLabel={props.onHoverLabel}
+      inToolbay={false} />}
+    {showStationaryToolbay && isUndefined(props.toolSlots) &&
+      (version.promoToolbay == "five-slot"
+        ? <PromoToolbay5 config={props.config} local={frame != "all"} />
+        : <PromoToolbay3 config={props.config} local={frame != "all"} />)}
+    {visibleTools.map((tool, i) =>
       <Tool key={i}
-        {...props}
+        config={props.config}
+        botPosition={props.configPosition}
+        dispatch={props.dispatch}
+        onSelectObject={props.onSelectObject}
+        onHoverObject={props.onHoverObject}
+        onToolSlotHoverObject={props.onToolSlotHoverObject}
+        onHoverLabel={props.onHoverLabel}
+        positionHelpers={positionHelpers}
         mountedToolName={mountedToolName}
+        renderFrame={frame}
         {...tool}
         x={tool.gantryMounted ? mirroredBotX : tool.x}
         y={tool.gantryMounted
@@ -175,15 +341,20 @@ export const Tools = (props: ToolsProps) => {
   </Group>;
 };
 
+export const Tools = React.memo(ToolsBase, toolsPropsEqual);
+
 interface OpacityFilterProps {
+  interactive?: boolean;
   opacity: number;
   children?: React.ReactNode;
 }
 
-const OpacityFilter = (props: OpacityFilterProps) => {
+export const OpacityFilter = (props: OpacityFilterProps) => {
   // eslint-disable-next-line no-null/no-null
   const groupRef = React.useRef<THREE.Group>(null);
+  const appliedOpacityRef = React.useRef<number | undefined>(undefined);
   React.useLayoutEffect(() => {
+    if (props.opacity >= 1 && isUndefined(appliedOpacityRef.current)) { return; }
     const current = groupRef.current as THREE.Group | { traverse?: Function } | null;
     if (current && typeof current.traverse == "function") {
       current.traverse((child: THREE.Object3D) => {
@@ -192,11 +363,17 @@ const OpacityFilter = (props: OpacityFilterProps) => {
           child.material.transparent = true;
           child.material.opacity = props.opacity;
           child.material.needsUpdate = true;
+          if (props.interactive === false) {
+            child.raycast = () => undefined;
+          }
         }
       });
+      appliedOpacityRef.current = props.opacity;
     }
-  }, [props.opacity]);
-  return <Group ref={groupRef}>{props.children}</Group>;
+  }, [props.interactive, props.opacity]);
+  return <Group name={"opacity-filter"} ref={groupRef}>
+    {props.children}
+  </Group>;
 };
 
 const displayedPulloutDirection = (
@@ -235,6 +412,23 @@ const rotationFactor = (toolPulloutDirection: ToolPulloutDirection) => {
   }
 };
 
+const Toolbay1ModelBase = () => {
+  const toolbay1 = useGLTF(ASSETS.models.toolbay1, LIB_DIR) as unknown as Toolbay1;
+  return <>
+    <Mesh name={"toolbay1"}
+      scale={1000}
+      geometry={toolbay1.nodes[PartName.toolbay1].geometry}>
+      <MeshPhongMaterial color={distinguishableBlack} />
+    </Mesh>
+    <Mesh name={"toolbay1-logo"}
+      scale={1000}
+      geometry={toolbay1.nodes[PartName.toolbay1Logo].geometry}>
+      <MeshPhongMaterial color={distinguishableBlack} />
+    </Mesh>
+  </>;
+};
+const Toolbay1Model = React.memo(Toolbay1ModelBase);
+
 interface ToolbaySlotProps {
   position: Record<Xyz, number>;
   children?: React.ReactNode;
@@ -244,48 +438,96 @@ interface ToolbaySlotProps {
   inToolbay: boolean;
   dispatch?: Function;
   config: Config;
+  onSelectObject?: ThreeDObjectSelectionHandler;
+  onHoverObject?: ThreeDObjectHoverHandler;
+  onHoverLabel?: ThreeDObjectHoverLabelHandler;
 }
+
+const stopPropagationForSelectedSlot = (
+  event: ThreeEvent<MouseEvent>,
+  onSelectObject: ThreeDObjectSelectionHandler,
+  selection: ThreeDObjectSelection,
+) =>
+  onSelectObject(selection) !== false && event.stopPropagation?.();
+
+const useToolSlotClick = (props: ToolbaySlotProps) => {
+  const navigate = useNavigate();
+  return (event: ThreeEvent<MouseEvent>) => {
+    if (clickWasDragged(event)) { return; }
+    const utmSelection = !props.inToolbay;
+    if ((props.id || utmSelection) && (props.dispatch || props.onSelectObject) &&
+      ![...HOVER_OBJECT_MODES, Mode.cameraSelection].includes(getMode())) {
+      if (props.onSelectObject) {
+        const selection: ThreeDObjectSelection = props.id
+          ? { kind: "slot", id: props.id }
+          : { kind: "utm", id: 0 };
+        stopPropagationForSelectedSlot(event, props.onSelectObject, selection);
+        return;
+      }
+      event.stopPropagation?.();
+      if (props.id) {
+        props.dispatch?.(setPanelOpen3D(true));
+        navigate(Path.toolSlots(props.id));
+      } else {
+        props.dispatch?.(setPanelOpen3D(true));
+        navigate(Path.tools());
+      }
+    }
+  };
+};
+
+const TOOLBAY_SLOT_Z_OFFSET = -9;
+const SEED_TROUGH_SLOT_Z_OFFSET = -40;
+
+const UtmToolHighlight = (props: {
+  children: React.ReactElement;
+  inToolbay: boolean;
+}) =>
+  props.inToolbay
+    ? props.children
+    : <Highlight highlightName={"utm"}>{props.children}</Highlight>;
 
 const ToolbaySlot = (props: ToolbaySlotProps) => {
   const { position, children, toolPulloutDirection, mounted } = props;
+  const selectable = !!props.id || !props.inToolbay;
+  let selection: ThreeDObjectSelection | undefined = undefined;
+  if (props.id) {
+    selection = { kind: "slot", id: props.id };
+  }
   const rotationMultiplier =
     rotationFactor(displayedPulloutDirection(
       toolPulloutDirection,
       props.config.mirrorX,
       props.config.mirrorY));
-  const navigate = useNavigate();
-  const toolbay1 = useGLTF(ASSETS.models.toolbay1, LIB_DIR) as unknown as Toolbay1;
-  return <Group name={props.inToolbay ? "slot" : "utm-tool"}
-    position={[
-      position.x + 5,
-      position.y,
-      position.z - 9,
-    ]}
-    onClick={() => {
-      if (props.id && !isUndefined(props.dispatch) &&
-        !HOVER_OBJECT_MODES.includes(getMode())) {
-        props.dispatch(setPanelOpen(true));
-        navigate(Path.toolSlots(props.id));
-      }
-    }}>
-    {rotationMultiplier &&
-      <Group name={"bay"}
-        rotation={[0, 0, rotationMultiplier * Math.PI / 2]}>
-        <Mesh name={"toolbay1"}
-          scale={1000}
-          geometry={toolbay1.nodes[PartName.toolbay1].geometry}>
-          <MeshPhongMaterial color={distinguishableBlack} />
-        </Mesh>
-        <Mesh name={"toolbay1-logo"}
-          scale={1000}
-          geometry={toolbay1.nodes[PartName.toolbay1Logo].geometry}>
-          <MeshPhongMaterial color={distinguishableBlack} />
-        </Mesh>
-      </Group>}
-    <OpacityFilter opacity={mounted ? 0.25 : 1}>
-      {children}
-    </OpacityFilter>
-  </Group>;
+  const onClick = useToolSlotClick(props);
+  return <UtmToolHighlight inToolbay={props.inToolbay}>
+    <Group name={props.inToolbay ? "slot" : "utm-tool"}
+      position={[
+        position.x,
+        position.y,
+        position.z + TOOLBAY_SLOT_Z_OFFSET,
+      ]}
+      onClick={onClick}
+      onPointerOver={() => {
+        if (!selectable) { return; }
+        props.onHoverObject?.(true);
+        props.onHoverLabel?.(selection);
+      }}
+      onPointerOut={() => {
+        if (!selectable) { return; }
+        props.onHoverObject?.(false);
+        props.onHoverLabel?.(undefined);
+      }}>
+      {rotationMultiplier &&
+        <Group name={"bay"}
+          rotation={[0, 0, rotationMultiplier * Math.PI / 2]}>
+          <Toolbay1Model />
+        </Group>}
+      <OpacityFilter opacity={mounted ? 0.25 : 1}>
+        {children}
+      </OpacityFilter>
+    </Group>
+  </UtmToolHighlight>;
 };
 
 interface ToolProps extends ThreeDTool {
@@ -293,199 +535,313 @@ interface ToolProps extends ThreeDTool {
   mountedToolName: string | undefined;
   config: Config;
   dispatch?: Function;
+  onSelectObject?: ThreeDObjectSelectionHandler;
+  onHoverObject?: ThreeDObjectHoverHandler;
+  onToolSlotHoverObject?: ThreeDObjectHoverHandler;
+  onHoverLabel?: ThreeDObjectHoverLabelHandler;
+  positionHelpers: ToolPositionHelpers;
+  renderFrame: "all" | ToolMountFrame;
+  botPosition: PositionConfig;
 }
 
+interface ToolModelProps {
+  config: Config;
+  inToolbay: boolean;
+}
+
+const RotaryToolModel = React.memo(
+  React.forwardRef<THREE.Mesh>((_props, ref) => {
+    const rotaryToolBase =
+      useGLTF(ASSETS.models.rotaryToolBase, LIB_DIR) as unknown as Model;
+    const rotaryToolImplement =
+      useGLTF(ASSETS.models.rotaryToolImplement, LIB_DIR) as unknown as Model;
+    return <Group name={"rotaryTool"}
+      position={[
+        0,
+        0,
+        10,
+      ]}
+      rotation={[0, 0, Math.PI / 2]}>
+      <ModelMesh name={"rotaryToolBase"}
+        model={rotaryToolBase} />
+      <Group
+        position={[0, -3, -52]}
+        rotation={[-10 * Math.PI / 180, 0, 0]}>
+        <ModelMesh name={"rotaryToolImplement"}
+          ref={ref}
+          model={rotaryToolImplement} />
+      </Group>
+    </Group>;
+  }),
+);
+RotaryToolModel.displayName = "RotaryToolModel";
+
+const WateringNozzleToolModel = React.memo(() => {
+  const wateringNozzle = useGLTF(
+    ASSETS.models.wateringNozzle, LIB_DIR) as unknown as WateringNozzle;
+  return <Mesh name={"wateringNozzle"}
+    position={[
+      6.25,
+      10.875,
+      15,
+    ]}
+    rotation={[0, 0, 2.094 + Math.PI / 2]}
+    scale={1000}
+    geometry={wateringNozzle.nodes[PartName.wateringNozzle].geometry}
+    material={wateringNozzle.materials.PaletteMaterial001} />;
+});
+
+const SeedBinToolModel = React.memo(() => {
+  const seedBin = useGLTF(ASSETS.models.seedBin, LIB_DIR) as unknown as SeedBin;
+  return <Mesh name={"seedBin"}
+    position={[
+      0,
+      0,
+      -4,
+    ]}
+    rotation={[0, 0, Math.PI / 2]}
+    scale={1000}
+    geometry={seedBin.nodes[PartName.seedBin].geometry}>
+    <MeshPhongMaterial color={"silver"} />
+  </Mesh>;
+});
+
+const SeedTrayToolModel = React.memo(() => {
+  const seedTray = useGLTF(ASSETS.models.seedTray, LIB_DIR) as unknown as SeedTray;
+  return <Mesh name={"seedTray"}
+    position={[
+      0,
+      0,
+      -4,
+    ]}
+    rotation={[0, 0, Math.PI / 2]}
+    scale={1000}
+    geometry={seedTray.nodes[PartName.seedTray].geometry}>
+    <MeshPhongMaterial color={"silver"} />
+  </Mesh>;
+});
+
+const SoilSensorToolModel = React.memo(() => {
+  const soilSensor = useGLTF(ASSETS.models.soilSensor, LIB_DIR) as unknown as SoilSensorFull;
+  return <SoilSensorModel
+    model={soilSensor}
+    name={"soilSensor"}
+    position={[
+      0,
+      0,
+      10,
+    ]}
+    rotation={[0, 0, Math.PI / 2]} />;
+});
+
+const SeederToolModel = React.memo((props: ToolModelProps) => {
+  const seeder = useGLTF(ASSETS.models.seeder, LIB_DIR) as unknown as Seeder;
+  return <>
+    <Mesh name={"seeder"}
+      position={[
+        0,
+        0,
+        -5,
+      ]}
+      rotation={[0, 0, Math.PI / 2]}
+      scale={1000}
+      geometry={seeder.nodes[PartName.seeder].geometry}
+      material={seeder.materials.PaletteMaterial001} />
+    {!props.inToolbay && props.config.vacuum &&
+      <Group position={[20, 0, -30]}>
+        <React.Suspense fallback={undefined}>
+          <SuctionAnimations zValues={[-50, -80, -95, -100]} />
+        </React.Suspense>
+      </Group>}
+  </>;
+}, (prev, next) =>
+  prev.inToolbay == next.inToolbay &&
+  prev.config.vacuum == next.config.vacuum);
+
+const WeederToolModel = React.memo(() => {
+  const weeder = useGLTF(ASSETS.models.weeder, LIB_DIR) as unknown as Weeder;
+  return <Mesh name={"weeder"}
+    position={[
+      -25,
+      20,
+      10,
+    ]}
+    rotation={[0, 0, -Math.PI]}
+    scale={1000}
+    geometry={weeder.nodes[PartName.weeder].geometry}
+    material={weeder.materials.PaletteMaterial001} />;
+});
+
+interface SeedTroughToolModelProps {
+  firstTrough?: boolean;
+}
+
+const SeedTroughWithAssemblyToolModel = React.memo(() => {
+  const seedTroughHolder = useGLTF(
+    ASSETS.models.seedTroughHolder, LIB_DIR) as unknown as SeedTroughHolderFull;
+  const seedTroughAssembly = useGLTF(
+    ASSETS.models.seedTroughAssembly,
+    LIB_DIR) as unknown as SeedTroughAssemblyFull;
+  return <Group name={"seedTroughWithAssembly"}>
+    <SeedTroughAssemblyModel
+      model={seedTroughAssembly}
+      name={"seedTroughAssembly"}
+      position={[3, 5, 30]} />
+    <SeedTroughHolderModel
+      model={seedTroughHolder}
+      name={"seedTroughHolder"} />
+  </Group>;
+});
+
+const SeedTroughOnlyToolModel = React.memo(() => {
+  const seedTrough = useGLTF(ASSETS.models.seedTrough, LIB_DIR) as unknown as SeedTrough;
+  return <Mesh name={"seedTrough"}
+    position={[
+      11.25,
+      5,
+      30,
+    ]}
+    scale={1000}
+    geometry={seedTrough.nodes[PartName.seedTrough].geometry}
+    material={frontSideMaterial(
+      seedTrough.materials[SeedTroughAssemblyMaterial.two],
+    )} />;
+});
+
+const SeedTroughToolModel = React.memo((props: SeedTroughToolModelProps) =>
+  props.firstTrough
+    ? <SeedTroughWithAssemblyToolModel />
+    : <SeedTroughOnlyToolModel />);
+
+interface SeedTroughToolSlotProps extends ToolbaySlotProps {
+  firstTrough?: boolean;
+}
+
+const SeedTroughToolSlot = (props: SeedTroughToolSlotProps) => {
+  const onClick = useToolSlotClick(props);
+  const selectable = !!props.id;
+  const selection: ThreeDObjectSelection | undefined = props.id
+    ? { kind: "slot", id: props.id }
+    : undefined;
+  return <UtmToolHighlight inToolbay={props.inToolbay}>
+    <Group
+      position={[
+        props.position.x - 19,
+        props.position.y + 5,
+        props.position.z + SEED_TROUGH_SLOT_Z_OFFSET,
+      ]}
+      rotation={[0, 0, Math.PI / 2]}
+      onClick={onClick}
+      onPointerOver={() => {
+        if (!selectable) { return; }
+        props.onHoverObject?.(true);
+        props.onHoverLabel?.(selection);
+      }}
+      onPointerOut={() => {
+        if (!selectable) { return; }
+        props.onHoverObject?.(false);
+        props.onHoverLabel?.(undefined);
+      }}>
+      <SeedTroughToolModel firstTrough={props.firstTrough} />
+    </Group>
+  </UtmToolHighlight>;
+};
+
+interface ActiveRotaryToolSlotProps extends ToolbaySlotProps {
+  rotary: number;
+}
+
+const ActiveRotaryToolSlot = (props: ActiveRotaryToolSlotProps) => {
+  const rotaryToolImplementRef =
+    React.useRef<THREE.Mesh>(undefined as unknown as THREE.Mesh);
+  const { rotary, ...slotProps } = props;
+  useFrame(() => {
+    if (rotaryToolImplementRef.current && rotary) {
+      const time = Date.now();
+      const speed = rotary > 0 ? 0.01 : -0.01;
+      rotaryToolImplementRef.current.rotation.z = time * speed;
+    }
+  });
+  return <ToolbaySlot {...slotProps}>
+    <RotaryToolModel ref={rotaryToolImplementRef} />
+  </ToolbaySlot>;
+};
+
 // eslint-disable-next-line complexity
-const Tool = (props: ToolProps) => {
+const ToolBase = (props: ToolProps) => {
   const {
     toolPulloutDirection, inToolbay, id, mountedToolName, config, dispatch,
   } = props;
   const mounted = inToolbay && props.toolName == mountedToolName;
-  const get3DPosition = get3DPositionFunc(config);
-  const get3DPositionNoMirror = get3DPositionNoMirrorFunc(config);
-  const mirroredPosition = get3DPosition({ x: props.x, y: props.y });
-  const noMirrorPosition = get3DPositionNoMirror({
-    x: props.x,
-    y: props.y,
-  });
-  const zZero = zZeroFunc(props.config);
-  const zDir = zDirFunc(props.config);
+  const worldPosition =
+    getToolRenderPosition(config, props, inToolbay, props.positionHelpers);
+  const kinematics = getBotKinematics(config, props.botPosition);
+  const frameOrigin = (() => {
+    switch (props.renderFrame) {
+      case "stationary": return kinematics.machineOrigin;
+      case "gantry": return [
+        kinematics.machineOrigin[0] + kinematics.gantryPosition[0],
+        kinematics.machineOrigin[1] + kinematics.gantryPosition[1],
+        kinematics.machineOrigin[2] + kinematics.gantryPosition[2],
+      ];
+      case "z-axis": return kinematics.anchors.utm.worldPosition;
+      case "all": return [0, 0, 0];
+    }
+  })();
   const position = {
-    x: inToolbay ? mirroredPosition.x : noMirrorPosition.x,
-    y: inToolbay && !props.gantryMounted
-      ? mirroredPosition.y
-      : noMirrorPosition.y,
-    z: zZero - zDir * props.z + (inToolbay ? 0 : (utmHeight / 2 - 15)),
+    x: worldPosition.x - frameOrigin[0],
+    y: worldPosition.y - frameOrigin[1],
+    z: worldPosition.z - frameOrigin[2],
   };
+  const onHoverObject = inToolbay
+    ? props.onToolSlotHoverObject || props.onHoverObject
+    : props.onHoverObject;
   const common: ToolbaySlotProps = {
     mounted, position, toolPulloutDirection, id, inToolbay, config, dispatch,
+    onSelectObject: props.onSelectObject,
+    onHoverObject,
+    onHoverLabel: props.onHoverLabel,
   };
-
-  const rotaryToolBase =
-    useGLTF(ASSETS.models.rotaryToolBase, LIB_DIR) as unknown as Model;
-  const rotaryToolImplement =
-    useGLTF(ASSETS.models.rotaryToolImplement, LIB_DIR) as unknown as Model;
-  const seedBin = useGLTF(ASSETS.models.seedBin, LIB_DIR) as unknown as SeedBin;
-  const seedTray = useGLTF(ASSETS.models.seedTray, LIB_DIR) as unknown as SeedTray;
-  const seedTrough = useGLTF(ASSETS.models.seedTrough, LIB_DIR) as unknown as SeedTrough;
-  const seedTroughHolder = useGLTF(
-    ASSETS.models.seedTroughHolder, LIB_DIR) as unknown as SeedTroughHolderFull;
-  const seedTroughAssembly = useGLTF(
-    ASSETS.models.seedTroughAssembly, LIB_DIR) as unknown as SeedTroughAssemblyFull;
-  const soilSensor = useGLTF(ASSETS.models.soilSensor, LIB_DIR) as unknown as SoilSensorFull;
-  const seeder = useGLTF(ASSETS.models.seeder, LIB_DIR) as unknown as Seeder;
-  const weeder = useGLTF(ASSETS.models.weeder, LIB_DIR) as unknown as Weeder;
-  const wateringNozzle = useGLTF(
-    ASSETS.models.wateringNozzle, LIB_DIR) as unknown as WateringNozzle;
-
-  // eslint-disable-next-line no-null/no-null
-  const rotaryToolImplementRef = React.useRef<THREE.Mesh>(null);
-
-  useFrame(() => {
-    if (rotaryToolImplementRef.current && !inToolbay && props.config.rotary) {
-      const time = Date.now();
-      const speed = props.config.rotary > 0 ? 0.01 : -0.01;
-      rotaryToolImplementRef.current.rotation.z = time * speed;
-    }
-  });
-  const X = 5.5;
   switch (props.toolName) {
     case ToolName.rotaryTool:
-      return <ToolbaySlot {...common}>
-        <Group name={"rotaryTool"}
-          position={[
-            X,
-            0,
-            10,
-          ]}
-          rotation={[0, 0, Math.PI / 2]}>
-          <ModelMesh name={"rotaryToolBase"}
-            model={rotaryToolBase} />
-          <Group
-            position={[0, -3, -52]}
-            rotation={[-10 * Math.PI / 180, 0, 0]}>
-            <ModelMesh name={"rotaryToolImplement"}
-              ref={rotaryToolImplementRef}
-              model={rotaryToolImplement} />
-          </Group>
-        </Group>
-      </ToolbaySlot>;
+      return inToolbay
+        ? <ToolbaySlot {...common}>
+          <RotaryToolModel />
+        </ToolbaySlot>
+        : <ActiveRotaryToolSlot
+          {...common}
+          rotary={props.config.rotary} />;
     case ToolName.wateringNozzle:
       return <ToolbaySlot {...common}>
-        <Mesh name={"wateringNozzle"}
-          position={[
-            X + 7.5,
-            10.5,
-            15,
-          ]}
-          rotation={[0, 0, 2.094 + Math.PI / 2]}
-          scale={1000}
-          geometry={wateringNozzle.nodes[PartName.wateringNozzle].geometry}
-          material={wateringNozzle.materials.PaletteMaterial001} />
+        <WateringNozzleToolModel />
       </ToolbaySlot>;
     case ToolName.seedBin:
       return <ToolbaySlot {...common}>
-        <Mesh name={"seedBin"}
-          position={[
-            X,
-            0,
-            -4,
-          ]}
-          rotation={[0, 0, Math.PI / 2]}
-          scale={1000}
-          geometry={seedBin.nodes[PartName.seedBin].geometry}>
-          <MeshPhongMaterial color={"silver"} />
-        </Mesh>
+        <SeedBinToolModel />
       </ToolbaySlot>;
     case ToolName.seedTray:
       return <ToolbaySlot {...common}>
-        <Mesh name={"seedTray"}
-          position={[
-            X,
-            0,
-            -4,
-          ]}
-          rotation={[0, 0, Math.PI / 2]}
-          scale={1000}
-          geometry={seedTray.nodes[PartName.seedTray].geometry}>
-          <MeshPhongMaterial color={"silver"} />
-        </Mesh>
+        <SeedTrayToolModel />
       </ToolbaySlot>;
     case ToolName.soilSensor:
       return <ToolbaySlot {...common}>
-        <SoilSensorModel
-          model={soilSensor}
-          name={"soilSensor"}
-          position={[
-            X,
-            0,
-            10,
-          ]}
-          rotation={[0, 0, Math.PI / 2]}
-          scale={1000} />
+        <SoilSensorToolModel />
       </ToolbaySlot>;
     case ToolName.seeder:
       return <ToolbaySlot {...common}>
-        <Mesh name={"seeder"}
-          position={[
-            X,
-            0,
-            -5,
-          ]}
-          rotation={[0, 0, Math.PI / 2]}
-          scale={1000}
-          geometry={seeder.nodes[PartName.seeder].geometry}
-          material={seeder.materials.PaletteMaterial001} />
-        {!inToolbay && props.config.vacuum &&
-          <Group position={[20, 0, -30]}>
-            {[-50, -80, -95, -100].map(z =>
-              <SuctionAnimation key={z} z={z} />)}
-          </Group>}
+        <SeederToolModel config={props.config} inToolbay={inToolbay} />
       </ToolbaySlot>;
     case ToolName.weeder:
       return <ToolbaySlot {...common}>
-        <Mesh name={"weeder"}
-          position={[
-            X - 25,
-            20,
-            10,
-          ]}
-          rotation={[0, 0, -Math.PI]}
-          scale={1000}
-          geometry={weeder.nodes[PartName.weeder].geometry}
-          material={weeder.materials.PaletteMaterial001} />
+        <WeederToolModel />
       </ToolbaySlot>;
     case ToolName.seedTrough:
-      return <Group
-        position={[
-          position.x - 30,
-          position.y + 2,
-          position.z - 40,
-        ]}
-        rotation={[0, 0, Math.PI / 2]}>
-        {props.firstTrough
-          ? <Group name={"seedTroughWithAssembly"}>
-            <SeedTroughAssemblyModel
-              model={seedTroughAssembly}
-              name={"seedTroughAssembly"}
-              position={[3, 2, 30]}
-              scale={1000} />
-            <SeedTroughHolderModel
-              model={seedTroughHolder}
-              name={"seedTroughHolder"}
-              scale={1000} />
-          </Group>
-          : <Mesh name={"seedTrough"}
-            position={[
-              15,
-              2,
-              30,
-            ]}
-            scale={1000}
-            geometry={seedTrough.nodes[PartName.seedTrough].geometry}
-            material={seedTrough.materials[SeedTroughAssemblyMaterial.two]} />}
-      </Group>;
+      return <SeedTroughToolSlot
+        {...common}
+        firstTrough={props.firstTrough} />;
     default:
       return <ToolbaySlot {...common} />;
   }
 };
+
+const Tool = React.memo(ToolBase);

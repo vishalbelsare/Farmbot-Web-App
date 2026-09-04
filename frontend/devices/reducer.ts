@@ -26,7 +26,6 @@ export const initialState = (): BotState => ({
   consistent: true,
   stepSize: 100,
   hardware: {
-    gpio_registry: {},
     mcu_params: {},
     jobs: {},
     location_data: {
@@ -55,7 +54,6 @@ export const initialState = (): BotState => ({
       target: "---",
       env: "---",
       node_name: "---",
-      firmware_version: "---",
       firmware_commit: "---",
     },
     user_env: {},
@@ -177,6 +175,7 @@ export const botReducer = generateReducer<BotState>(initialState())
     })
   .add<boolean>(Actions.DEMO_SET_ESTOP, (s, { payload }) => {
     s.hardware.informational_settings.locked = payload;
+    s.hardware.informational_settings.busy = false;
     s.hardware.pins = {};
     s.hardware.jobs = {};
     s.demoQueueLength = 0;
@@ -184,6 +183,10 @@ export const botReducer = generateReducer<BotState>(initialState())
   })
   .add<number>(Actions.DEMO_SET_QUEUE_LENGTH, (s, { payload }) => {
     s.demoQueueLength = payload;
+    return s;
+  })
+  .add<boolean>(Actions.DEMO_SET_BUSY, (s, { payload }) => {
+    s.hardware.informational_settings.busy = payload;
     return s;
   })
   .add<PingResultPayload>(Actions.PING_OK, (s) => {
@@ -214,9 +217,25 @@ const unstash = (s: BotState) =>
 function statusHandler(state: BotState,
   action: ReduxAction<HardwareState>): BotState {
   const { payload } = action;
-  state.hardware = payload;
+  const emptyHardware = initialState().hardware;
+  state.hardware = {
+    ...emptyHardware,
+    ...payload,
+    location_data: {
+      ...emptyHardware.location_data,
+      ...payload.location_data,
+    },
+    informational_settings: {
+      ...emptyHardware.informational_settings,
+      ...payload.informational_settings,
+    },
+    process_info: {
+      ...emptyHardware.process_info,
+      ...payload.process_info,
+    },
+  };
 
-  updateMotorHistoryArray(payload.location_data);
+  updateMotorHistoryArray(state.hardware.location_data);
 
   const { informational_settings } = state.hardware;
   const syncStatus = informational_settings.sync_status;

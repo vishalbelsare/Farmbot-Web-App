@@ -1,21 +1,23 @@
 import React from "react";
 import { MapTransformProps } from "../../interfaces";
-import { CameraCalibrationData, DesignerState } from "../../../interfaces";
+import {
+  CameraCalibrationData, DesignerState, ThreeDDesignerState,
+} from "../../../interfaces";
 import { TaggedImage } from "farmbot";
 import { cameraZCheck, MapImage } from "./map_image";
-import { reverse, cloneDeep, some } from "lodash";
+import { some } from "lodash";
 import { equals } from "../../../../util";
 import { BooleanSetting, StringSetting } from "../../../../session_keys";
 import { GetWebAppConfigValue } from "../../../../config_storage/actions";
 import {
-  parseFilterSetting, IMAGE_LAYER_CONFIG_KEYS, imageInRange, imageIsHidden,
+  parseFilterSetting, IMAGE_LAYER_CONFIG_KEYS, imageInRange, notHidden,
   filterImagesByType,
 } from "../../../../photos/photo_filter_settings/util";
 
 export interface FilterImagesProps {
   visible: boolean;
   images: TaggedImage[] | undefined;
-  designer: DesignerState | undefined;
+  designer: ThreeDDesignerState | undefined;
   getConfigValue: GetWebAppConfigValue | undefined;
   calibrationZ: string | undefined;
 }
@@ -23,6 +25,9 @@ export interface FilterImagesProps {
 export interface TaggedImagePlus extends TaggedImage {
   highlighted: boolean;
 }
+
+const hasProcessedAttachment = (image: TaggedImage) =>
+  !image.body.attachment_url.includes("placeholder");
 
 export const filterImages = (props: FilterImagesProps): TaggedImagePlus[] => {
   const { visible, images, designer, getConfigValue, calibrationZ } = props;
@@ -35,16 +40,18 @@ export const filterImages = (props: FilterImagesProps): TaggedImagePlus[] => {
   const imageFilterEnd = getFilterValue(StringSetting.photo_filter_end);
   const rangeOverride = alwaysHighlightImage || hideUnShownImages;
   const hoveredImage: TaggedImage | undefined =
-    images.filter(img => hoveredMapImage && img.body.id == hoveredMapImage
-      || (alwaysHighlightImage && shownImages.includes(img.body.id || 0)))[0];
-  const filteredImages = reverse(cloneDeep(images))
+    images.filter(img => hasProcessedAttachment(img)
+      && (hoveredMapImage && img.body.id == hoveredMapImage
+        || (alwaysHighlightImage
+          && shownImages.includes(img.body.id || 0))))[0];
+  const filteredImages = images.slice().reverse()
     .filter(img =>
       (rangeOverride && shownImages.includes(img.body.id || 0))
-      || imageInRange(img, imageFilterBegin, imageFilterEnd))
-    .filter(img => !imageIsHidden(
-      hiddenImages, shownImages, hideUnShownImages, img.body.id))
-    .filter(filterImagesByType(designer))
-    .filter(img => !img.body.attachment_url.includes("placeholder"))
+      || imageInRange(img, imageFilterBegin, imageFilterEnd).value)
+    .filter(img => notHidden(
+      hiddenImages, shownImages, hideUnShownImages, img.body.id).value)
+    .filter(img => filterImagesByType(designer)(img).value)
+    .filter(hasProcessedAttachment)
     .filter(img => !hoveredImage || (img.body.id != hoveredImage.body.id))
     .filter(img => cameraZCheck(img.body.meta.z, calibrationZ))
     .map(img => ({ ...img, highlighted: false }));

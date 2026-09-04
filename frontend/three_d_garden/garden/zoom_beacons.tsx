@@ -1,19 +1,21 @@
 import { Sphere, Html, Line } from "@react-three/drei";
 import React from "react";
 import { Config, PositionConfig } from "../config";
-import { FOCI, getCameraOffset, setUrlParam } from "../zoom_beacons_constants";
+import { FOCI, setUrlParam } from "../zoom_beacons_constants";
 import { animated, useSpring } from "@react-spring/three";
 import { SpringValue, to } from "@react-spring/core";
-import { Group, MeshPhongMaterial, Mesh } from "../components";
+import { Group, MeshPhongMaterial } from "../components";
 import { isDesktop } from "../../screen_size";
 import { RenderOrder } from "../constants";
 import {
   easeInOutCubic, useFocusTransition, useFocusVisibilityClass,
 } from "../focus_transition";
+import {
+  ControlHandle, ControlPulse, ControlSphere,
+} from "../controls";
 
 const beaconColor = "#0266b5";
 
-const AnimatedMesh = animated(Mesh);
 const AnimatedGroup = animated(Group);
 const AnimatedMeshPhongMaterial = animated(MeshPhongMaterial);
 type Focus = ReturnType<typeof FOCI>[number];
@@ -27,49 +29,17 @@ export interface ZoomBeaconsProps {
   loadInScale?: SpringValue<number> | number;
 }
 
-interface BeaconPulseProps {
-  beaconSize: number;
-  animate: boolean;
-  parentOpacity: SpringValue<number>;
-}
-
-const BeaconPulse = (props: BeaconPulseProps) => {
-  const { beaconSize, animate, parentOpacity } = props;
-  const { scale, opacity } = useSpring({
-    from: { scale: 1, opacity: 0.75 },
-    to: async (next) => {
-      while (animate) {
-        await next({ scale: 2.5, opacity: 0 });
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        await next({ scale: 1, opacity: 0.75, immediate: true });
-      }
-    },
-    config: { duration: 1500 }
-  });
-
-  return <AnimatedMesh scale={scale}>
-    <Sphere args={[beaconSize, 12, 12]}
-      renderOrder={RenderOrder.beacons}>
-      <AnimatedMeshPhongMaterial
-        color={beaconColor}
-        opacity={to([opacity, parentOpacity], (pulse, parent) =>
-          pulse * parent)}
-        depthWrite={false}
-        transparent={true} />
-    </Sphere>
-  </AnimatedMesh>;
-};
-
 interface BeaconVisualProps {
   activeFocus: string;
+  animate: boolean;
   beaconSize: number;
   hovered: boolean;
   onClick(): void;
   onPointerEnter(): void;
   onPointerLeave(): void;
-  config: Config;
   loadInOpacity?: SpringValue<number>;
   loadInScale?: SpringValue<number> | number;
+  xlSize: boolean;
 }
 
 const BeaconVisual = (props: BeaconVisualProps) => {
@@ -102,34 +72,41 @@ const BeaconVisual = (props: BeaconVisualProps) => {
     ? to([opacity, props.loadInOpacity], (focus, load) => focus * load)
     : opacity;
 
-  return <AnimatedGroup name={"beacon-visual"}
-    scale={props.loadInScale}>
-    <Sphere name={"beacon-sphere"}
-      renderOrder={RenderOrder.beacons}
-      onClick={props.onClick}
-      onPointerEnter={props.onPointerEnter}
-      onPointerLeave={props.onPointerLeave}
-      receiveShadow={false}
-      castShadow={false}
-      args={[
-        props.beaconSize
-        * (props.hovered ? 1.5 : 1)
-        * ((!props.activeFocus && props.config.sizePreset == "Genesis XL")
-          ? 1.5
-          : 1),
-        12,
-        12,
-      ]}>
-      <AnimatedMeshPhongMaterial
+  return <AnimatedGroup name={"beacon-visual"} scale={props.loadInScale}>
+    <ControlHandle
+      name={"beacon-control"}
+      enabled={!props.activeFocus}
+      cursor={"zoom-in"}
+      onActivate={props.onClick}
+      onHoverChange={hovered => {
+        hovered ? props.onPointerEnter() : props.onPointerLeave();
+      }}>
+      {state => <ControlSphere
+        name={"beacon-sphere"}
+        radius={props.beaconSize
+          * ((!props.activeFocus && props.xlSize) ? 1.5 : 1)}
+        segments={12}
         color={beaconColor}
-        opacity={beaconOpacity}
-        depthWrite={false}
-        transparent={true} />
-    </Sphere>
-    <BeaconPulse
-      beaconSize={props.beaconSize}
-      animate={props.config.animate}
-      parentOpacity={beaconOpacity as SpringValue<number>} />
+        hoverColor={beaconColor}
+        hoverScale={1.5}
+        hovered={state.hovered || props.hovered}
+        enabled={!props.activeFocus}
+        renderOrder={RenderOrder.beacons}
+        material={
+          <AnimatedMeshPhongMaterial
+            color={beaconColor}
+            opacity={beaconOpacity}
+            depthWrite={false}
+            transparent={true} />}>
+        <ControlPulse
+          enabled={props.animate}
+          radius={props.beaconSize}
+          color={beaconColor}
+          parentOpacity={beaconOpacity as SpringValue<number>}
+          depthWrite={true}
+          renderOrder={RenderOrder.beacons} />
+      </ControlSphere>}
+    </ControlHandle>
   </AnimatedGroup>;
 };
 
@@ -168,67 +145,158 @@ const BeaconInfo = (props: BeaconInfoProps) => {
   </Html>;
 };
 
+interface ZoomBeaconProps {
+  activeFocus: string;
+  animate: boolean;
+  beaconSize: number;
+  desktop: boolean;
+  focus: Focus;
+  hovered: boolean;
+  loadInOpacity?: SpringValue<number>;
+  loadInScale?: SpringValue<number> | number;
+  setActiveFocus(focus: string): void;
+  setHoveredFocus(focus: string): void;
+  xlSize: boolean;
+  zoomBeaconDebug: boolean;
+}
+
+const ZoomBeaconView = (props: ZoomBeaconProps) => {
+  const {
+    activeFocus,
+    animate,
+    beaconSize,
+    desktop,
+    focus,
+    hovered,
+    loadInOpacity,
+    loadInScale,
+    setActiveFocus,
+    setHoveredFocus,
+    xlSize,
+    zoomBeaconDebug,
+  } = props;
+  const camera = desktop ? focus.camera.wide : focus.camera.narrow;
+  const exitFocus = () => {
+    setActiveFocus("");
+    setUrlParam("focus", "");
+  };
+  const enterFocus = () => {
+    if (activeFocus) { return; }
+    setActiveFocus(focus.label);
+    setUrlParam("focus", focus.label);
+    setHoveredFocus("");
+  };
+  return <Group name={"zoom-beacon"} position={focus.position}>
+    {zoomBeaconDebug &&
+      <Group name={"debug-group"}>
+        <Sphere args={[30]} position={camera.position}
+          material-color={"cyan"} />
+        <Line points={[camera.position, camera.target]}
+          color={"yellow"} lineWidth={2} />
+        <Sphere args={[30]} position={camera.target}
+          material-color={"orange"} />
+      </Group>}
+    <BeaconVisual
+      activeFocus={activeFocus}
+      animate={animate}
+      beaconSize={beaconSize}
+      hovered={hovered}
+      loadInOpacity={loadInOpacity}
+      loadInScale={loadInScale}
+      onClick={enterFocus}
+      onPointerEnter={() => {
+        if (activeFocus) { return; }
+        setHoveredFocus(focus.label);
+      }}
+      onPointerLeave={() => {
+        setHoveredFocus("");
+      }}
+      xlSize={xlSize} />
+    <BeaconInfo
+      focus={focus}
+      active={activeFocus == focus.label}
+      onExit={exitFocus} />
+  </Group>;
+};
+
+const ZoomBeacon = React.memo(ZoomBeaconView, (prev, next) =>
+  prev.activeFocus == next.activeFocus &&
+  prev.animate == next.animate &&
+  prev.beaconSize == next.beaconSize &&
+  prev.desktop == next.desktop &&
+  prev.focus == next.focus &&
+  prev.hovered == next.hovered &&
+  prev.loadInOpacity == next.loadInOpacity &&
+  prev.loadInScale == next.loadInScale &&
+  prev.setActiveFocus == next.setActiveFocus &&
+  prev.setHoveredFocus == next.setHoveredFocus &&
+  prev.xlSize == next.xlSize &&
+  prev.zoomBeaconDebug == next.zoomBeaconDebug);
+
 export const ZoomBeacons = (props: ZoomBeaconsProps) => {
   const [hoveredFocus, setHoveredFocus] = React.useState("");
   const { activeFocus, setActiveFocus } = props;
-  const gardenBedDiv =
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
-    document.querySelector(".garden-bed-3d-model") as HTMLElement | null;
-
-  const beaconSize = isDesktop() ? 60 : 80;
+  const {
+    bedHeight,
+    bedLengthOuter,
+    bedWidthOuter,
+    bedXOffset,
+    bedYOffset,
+    bedZOffset,
+    columnLength,
+    legSize,
+    negativeZ,
+    sizePreset,
+    zGantryOffset,
+  } = props.config;
+  const { x, y, z } = props.configPosition;
+  const foci = React.useMemo(() => FOCI({
+    bedHeight,
+    bedLengthOuter,
+    bedWidthOuter,
+    bedXOffset,
+    bedYOffset,
+    bedZOffset,
+    columnLength,
+    legSize,
+    negativeZ,
+    sizePreset,
+    zGantryOffset,
+  } as Config, { x, y, z }), [
+    bedHeight,
+    bedLengthOuter,
+    bedWidthOuter,
+    bedXOffset,
+    bedYOffset,
+    bedZOffset,
+    columnLength,
+    legSize,
+    negativeZ,
+    sizePreset,
+    x,
+    y,
+    z,
+    zGantryOffset,
+  ]);
+  const desktop = isDesktop();
+  const beaconSize = desktop ? 60 : 80;
+  const { animate, zoomBeaconDebug } = props.config;
+  const xlSize = props.config.sizePreset == "Genesis XL";
   return <Group name={"zoom-beacons"}>
-    {FOCI(props.config, props.configPosition).map(focus => {
-      const camera = getCameraOffset(focus);
-      const exitFocus = () => {
-        setActiveFocus("");
-        setUrlParam("focus", "");
-      };
-      const enterFocus = () => {
-        if (activeFocus) { return; }
-        setActiveFocus(focus.label);
-        setUrlParam("focus", focus.label);
-        setHoveredFocus("");
-        if (gardenBedDiv) {
-          gardenBedDiv.style.cursor = "";
-        }
-      };
-      return <Group name={"zoom-beacon"} key={focus.label}
-        position={focus.position}>
-        {props.config.zoomBeaconDebug &&
-          <Group name={"debug-group"}>
-            <Sphere args={[30]} position={camera.position}
-              material-color={"cyan"} />
-            <Line points={[camera.position, camera.target]}
-              color={"yellow"} lineWidth={2} />
-            <Sphere args={[30]} position={camera.target}
-              material-color={"orange"} />
-          </Group>}
-        <BeaconVisual
-          activeFocus={activeFocus}
-          beaconSize={beaconSize}
-          config={props.config}
-          hovered={hoveredFocus == focus.label}
-          loadInOpacity={props.loadInOpacity}
-          loadInScale={props.loadInScale}
-          onClick={enterFocus}
-          onPointerEnter={() => {
-            if (activeFocus) { return; }
-            setHoveredFocus(focus.label);
-            if (gardenBedDiv) {
-              gardenBedDiv.style.cursor = "zoom-in";
-            }
-          }}
-          onPointerLeave={() => {
-            setHoveredFocus("");
-            if (gardenBedDiv) {
-              gardenBedDiv.style.cursor = "";
-            }
-          }} />
-        <BeaconInfo
-          focus={focus}
-          active={activeFocus == focus.label}
-          onExit={exitFocus} />
-      </Group>;
-    })}
+    {foci.map(focus =>
+      <ZoomBeacon
+        key={focus.label}
+        activeFocus={activeFocus}
+        animate={animate}
+        beaconSize={beaconSize}
+        desktop={desktop}
+        focus={focus}
+        hovered={hoveredFocus == focus.label}
+        loadInOpacity={props.loadInOpacity}
+        loadInScale={props.loadInScale}
+        setActiveFocus={setActiveFocus}
+        setHoveredFocus={setHoveredFocus}
+        xlSize={xlSize}
+        zoomBeaconDebug={zoomBeaconDebug} />)}
   </Group>;
 };

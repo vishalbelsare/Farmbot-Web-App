@@ -1,11 +1,18 @@
 import React from "react";
-import { namespace3D, ThreeDSettings } from "../three_d_settings";
+import {
+  get3DConfigValueFunction, namespace3D, SCENE_DDI_LIST, SCENE_DDIS,
+  TEXTURE_DDIS, ThreeDConfig, ThreeDSettings,
+} from "../three_d_settings";
 import { ThreeDSettingsProps } from "../interfaces";
 import { settingsPanelState } from "../../__test_support__/panel_state";
 import { changeBlurableInputRTL } from "../../__test_support__/helpers";
 import * as crud from "../../api/crud";
 import { fakeFarmwareEnv } from "../../__test_support__/fake_state/resources";
 import { fireEvent, render, within } from "@testing-library/react";
+import * as ui from "../../ui";
+import type { FBSelectProps } from "../../ui";
+import { DeviceSetting } from "../../constants";
+import { DevSettings } from "../dev/dev_support";
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -25,6 +32,7 @@ describe("<ThreeDSettings />", () => {
       settingsPanelState: state,
       farmwareEnvs: [],
       distanceIndicator: "",
+      sceneObjectUuids: [],
     };
   };
 
@@ -39,6 +47,20 @@ describe("<ThreeDSettings />", () => {
     p.distanceIndicator = "bedWallThickness";
     const { container } = render(<ThreeDSettings {...p} />);
     expect(within(container).getByDisplayValue("40")).toBeDefined();
+  });
+
+  it("toggles distance indicator help", () => {
+    const p = fakeProps();
+    const { container } = render(<ThreeDSettings {...p} />);
+    const help = container.querySelector(".help-icon");
+    if (!help) { throw new Error("Missing help icon"); }
+
+    fireEvent.click(help);
+
+    expect(p.dispatch).toHaveBeenCalledWith({
+      type: "SET_DISTANCE_INDICATOR",
+      payload: "bedWallThickness",
+    });
   });
 
   it("creates env", () => {
@@ -92,5 +114,196 @@ describe("<ThreeDSettings />", () => {
     expect(crud.initSave).not.toHaveBeenCalled();
     expect(crud.edit).toHaveBeenCalledWith(fakeEnv, { value: "0" });
     expect(crud.save).toHaveBeenCalledWith(fakeEnv.uuid);
+  });
+});
+
+describe("get3DConfigValueFunction()", () => {
+  it("reads indexed 3D config values and defaults", () => {
+    const bedWallThickness = fakeFarmwareEnv();
+    bedWallThickness.body.key = namespace3D("bedWallThickness");
+    bedWallThickness.body.value = "99.5";
+    const unrelated = fakeFarmwareEnv();
+    unrelated.body.key = "bedHeight";
+    unrelated.body.value = "123";
+
+    const getValue = get3DConfigValueFunction([unrelated, bedWallThickness]);
+
+    expect(getValue("bedWallThickness")).toEqual(99.5);
+    expect(getValue("bedHeight")).toEqual(300);
+    expect(getValue("cameraFitDebug")).toEqual(0);
+    expect(getValue("viewCube")).toEqual(1);
+    expect(getValue("groundTexture")).toEqual(0);
+  });
+
+  it("reads the prefixed camera-fit debug setting", () => {
+    const cameraFitDebug = fakeFarmwareEnv();
+    cameraFitDebug.body.key = namespace3D("cameraFitDebug");
+    cameraFitDebug.body.value = "1";
+    expect(get3DConfigValueFunction([cameraFitDebug])("cameraFitDebug"))
+      .toEqual(1);
+  });
+
+  it("reads boolean constellation custom settings", () => {
+    const constellations = fakeFarmwareEnv();
+    constellations.body.key = namespace3D("constellations");
+    constellations.body.value = "false";
+    const debug = fakeFarmwareEnv();
+    debug.body.key = namespace3D("constellationsDebug");
+    debug.body.value = "true";
+    const getValue = get3DConfigValueFunction([constellations, debug]);
+
+    expect(getValue("constellations")).toEqual(0);
+    expect(getValue("constellationsDebug")).toEqual(1);
+  });
+
+  it("preserves first matching env behavior", () => {
+    const first = fakeFarmwareEnv();
+    first.body.key = namespace3D("grid");
+    first.body.value = "1";
+    const second = fakeFarmwareEnv();
+    second.body.key = namespace3D("grid");
+    second.body.value = "0";
+
+    const getValue = get3DConfigValueFunction([first, second]);
+
+    expect(getValue("grid")).toEqual(1);
+  });
+});
+
+describe("TEXTURE_DDIS", () => {
+  it("uses display labels and preserves stored values", () => {
+    expect(TEXTURE_DDIS()).toEqual({
+      0: { label: "Grass", value: 0 },
+      1: { label: "Bricks", value: 1 },
+      2: { label: "Concrete", value: 2 },
+      3: { label: "Water", value: 3 },
+      4: { label: "Aluminum", value: 4 },
+      5: { label: "Soil", value: 5 },
+      6: { label: "Sand", value: 6 },
+      7: { label: "Wood", value: 7 },
+    });
+  });
+});
+
+describe("SCENE_DDIS", () => {
+  it("uses display labels and preserves stored values", () => {
+    expect(SCENE_DDIS()).toEqual({
+      0: { label: "Custom", value: 0 },
+      1: { label: "Outdoor", value: 1 },
+      2: { label: "Lab", value: 2 },
+      3: { label: "Greenhouse", value: 3 },
+      4: { label: "Mars", value: 4 },
+    });
+  });
+
+  it("hides Mars when future features are disabled", () => {
+    const enabled = jest.spyOn(DevSettings, "futureFeaturesEnabled")
+      .mockReturnValue(false);
+
+    expect(SCENE_DDI_LIST().map(item => item.label))
+      .toEqual(["Custom", "Outdoor", "Lab", "Greenhouse", "Mars"]);
+    enabled.mockRestore();
+  });
+
+  it("shows Mars when future features are enabled", () => {
+    const enabled = jest.spyOn(DevSettings, "futureFeaturesEnabled")
+      .mockReturnValue(true);
+
+    expect(SCENE_DDI_LIST().map(item => item.label))
+      .toEqual(["Custom", "Outdoor", "Lab", "Greenhouse", "Mars"]);
+    enabled.mockRestore();
+  });
+});
+
+describe("<ThreeDConfig /> scene selection", () => {
+  it("changes the selected ground texture", () => {
+    let fbSelectProps: FBSelectProps | undefined;
+    const fbSelectSpy = jest.spyOn(ui, "FBSelect")
+      .mockImplementation(((props: FBSelectProps) => {
+        fbSelectProps = props;
+        return <div />;
+      }) as never);
+    const findOrCreate = jest.fn();
+    render(<ThreeDConfig
+      dispatch={jest.fn()}
+      setting={DeviceSetting.groundTexture}
+      configKey={"groundTexture"}
+      tooltip={""}
+      getValue={() => 0}
+      findOrCreate={findOrCreate}
+      isTexture={true}
+      sceneObjectUuids={[]} />);
+
+    fbSelectProps?.onChange({ label: "Sand", value: 6 });
+
+    expect(findOrCreate).toHaveBeenCalledWith("groundTexture", "6");
+    fbSelectSpy.mockRestore();
+  });
+
+  it("changes to Custom without deleting saved scene objects", () => {
+    const fbSelectProps: FBSelectProps[] = [];
+    const fbSelectSpy = jest.spyOn(ui, "FBSelect")
+      .mockImplementation(((props: FBSelectProps) => {
+        fbSelectProps.push(props);
+        return <div />;
+      }) as never);
+    const dispatch = jest.fn();
+    const findOrCreate = jest.fn();
+    render(<ThreeDConfig
+      dispatch={dispatch}
+      setting={DeviceSetting.environment}
+      configKey={"scene"}
+      tooltip={""}
+      getValue={() => 2}
+      findOrCreate={findOrCreate}
+      isScene={true}
+      sceneObjectUuids={["SceneObject.1.1"]} />);
+
+    fbSelectProps[0].onChange({ label: "Custom", value: 0 });
+
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(findOrCreate).toHaveBeenCalledWith("scene", "0");
+    expect(findOrCreate).toHaveBeenCalledWith("groundTexture", "0");
+    fbSelectSpy.mockRestore();
+  });
+
+  it("confirms before replacing saved scene objects", () => {
+    const fbSelectProps: FBSelectProps[] = [];
+    const fbSelectSpy = jest.spyOn(ui, "FBSelect")
+      .mockImplementation(((props: FBSelectProps) => {
+        fbSelectProps.push(props);
+        return <div />;
+      }) as never);
+    const destroy = jest.spyOn(crud, "destroy")
+      .mockImplementation(uuid => `destroy ${uuid}` as never);
+    const confirm = jest.spyOn(window, "confirm")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    const dispatch = jest.fn();
+    const findOrCreate = jest.fn();
+    render(<ThreeDConfig
+      dispatch={dispatch}
+      setting={DeviceSetting.environment}
+      configKey={"scene"}
+      tooltip={""}
+      getValue={() => 0}
+      findOrCreate={findOrCreate}
+      isScene={true}
+      sceneObjectUuids={["SceneObject.1.1", "SceneObject.2.2"]} />);
+
+    fbSelectProps[0].onChange({ label: "Outdoor", value: 1 });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(findOrCreate).not.toHaveBeenCalled();
+
+    fbSelectProps[0].onChange({ label: "Outdoor", value: 1 });
+    expect(destroy).toHaveBeenCalledWith("SceneObject.1.1");
+    expect(destroy).toHaveBeenCalledWith("SceneObject.2.2");
+    expect(dispatch).toHaveBeenCalledWith("destroy SceneObject.1.1");
+    expect(dispatch).toHaveBeenCalledWith("destroy SceneObject.2.2");
+    expect(findOrCreate).toHaveBeenCalledWith("scene", "1");
+    expect(findOrCreate).toHaveBeenCalledWith("groundTexture", "0");
+    confirm.mockRestore();
+    destroy.mockRestore();
+    fbSelectSpy.mockRestore();
   });
 });

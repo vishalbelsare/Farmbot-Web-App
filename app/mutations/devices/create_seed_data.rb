@@ -21,11 +21,13 @@ module Devices
       "genesis_1.6" => Devices::Seeders::GenesisOneSix,
       "genesis_1.7" => Devices::Seeders::GenesisOneSeven,
       "genesis_1.8" => Devices::Seeders::GenesisOneEight,
+      "genesis_1.9" => Devices::Seeders::GenesisOneNine,
       "genesis_xl_1.4" => Devices::Seeders::GenesisXlOneFour,
       "genesis_xl_1.5" => Devices::Seeders::GenesisXlOneFive,
       "genesis_xl_1.6" => Devices::Seeders::GenesisXlOneSix,
       "genesis_xl_1.7" => Devices::Seeders::GenesisXlOneSeven,
       "genesis_xl_1.8" => Devices::Seeders::GenesisXlOneEight,
+      "genesis_xl_1.9" => Devices::Seeders::GenesisXlOneNine,
 
       "none" => Devices::Seeders::None,
     }.merge(STRESS_PRODUCT_LINES)
@@ -61,7 +63,7 @@ module Devices
 
     def run_seeds!
       if demo
-        Devices::Seeders::DemoAccountSeeder.new(device).before_product_line_seeder
+        Devices::Seeders::DemoAccountSeeder.new(device).before_product_line_seeder(product_line)
       end
 
       seeder.class::COMMAND_ORDER.map do |cmd|

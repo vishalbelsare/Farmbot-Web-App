@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+render_env="scripts/ci/render-env"
+github_env="${GITHUB_ENV:?GITHUB_ENV is required}"
+
+set -a
+# shellcheck disable=SC1091
+. "$render_env"
+set +a
+
+for name in "${RENDER_ENV_NAMES[@]}"; do
+  echo "$name=${!name}" >> "$github_env"
+done

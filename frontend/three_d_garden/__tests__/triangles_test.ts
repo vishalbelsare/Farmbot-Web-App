@@ -101,6 +101,12 @@ describe("filterSoilPoints()", () => {
     p.points = [point0, point1];
     expect(filterSoilPoints(p).length).toEqual(5);
   });
+
+  it("includes preview soil points", () => {
+    const p = fakeProps();
+    p.previewPoints = [[500, 500, -300]];
+    expect(filterSoilPoints(p)).toContainEqual([500, 500, -300]);
+  });
 });
 
 describe("filterMoisturePoints()", () => {
@@ -133,5 +139,20 @@ describe("filterMoisturePoints()", () => {
     reading2.body.mode = 1;
     p.readings = [reading0, reading1, reading2];
     expect(filterMoisturePoints(p).length).toEqual(9);
+  });
+
+  it("adds boundary points in order", () => {
+    const p = fakeProps();
+    const points = filterMoisturePoints(p);
+    expect(points).toEqual([
+      [-110, 20, 0],
+      [-110, 1300, 0],
+      [2810, 20, 0],
+      [2810, 1300, 0],
+      [-109.99, 20.01, 0],
+      [-109.99, 1299.99, 0],
+      [2809.99, 20.01, 0],
+      [2809.99, 1299.99, 0],
+    ]);
   });
 });

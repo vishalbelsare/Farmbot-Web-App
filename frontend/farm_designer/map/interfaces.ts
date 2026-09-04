@@ -19,6 +19,7 @@ import type { TimeSettings } from "../../interfaces";
 import type { UUID } from "../../resources/interfaces";
 import type { PeripheralValues } from "./layers/farmbot/bot_trail";
 import type { GetColor } from "./layers/points/interpolation_map";
+import type { Config } from "../../three_d_garden/config";
 
 export type TaggedPlant = TaggedPlantPointer | TaggedPlantTemplate;
 
@@ -54,9 +55,12 @@ export interface GardenMapLegendProps {
   showZones: boolean;
   showSensorReadings: boolean;
   showMoistureInterpolationMap: boolean;
+  showSceneObjects: boolean;
   dispatch: Function;
   timeSettings: TimeSettings;
   getConfigValue: GetWebAppConfigValue;
+  get3DConfigValue?(key: keyof Config): number;
+  set3DConfigValue?(key: keyof Config, value: string): void;
   imageAgeInfo: { newestDate: string, toOldest: number };
   gardenId?: number;
   className?: string;
@@ -65,6 +69,7 @@ export interface GardenMapLegendProps {
   firmwareConfig: McuParams;
   botLocationData: BotLocationData;
   botSize: BotSize;
+  gardenSize: AxisNumberProperty;
   designer: DesignerState;
 }
 

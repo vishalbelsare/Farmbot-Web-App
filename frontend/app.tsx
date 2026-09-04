@@ -9,6 +9,7 @@ import {
   ResourceName, Xyz,
 } from "farmbot";
 import { HotKeys } from "./hotkeys";
+import { CommandPalette } from "./command_palette";
 import { Content } from "./constants";
 import { BooleanSetting, StringSetting } from "./session_keys";
 import {
@@ -29,6 +30,7 @@ import { AppState } from "./reducer";
 import { Navigate, Outlet } from "react-router";
 import { ErrorBoundary } from "./error_boundary";
 import { DesignerState } from "./farm_designer/interfaces";
+import { setPanelOpen } from "./farm_designer/panel_header";
 
 export interface AppProps {
   dispatch: Function;
@@ -41,6 +43,7 @@ export interface AppProps {
   apiFirmwareValue: FirmwareHardware | undefined;
   appState: AppState;
   designer: DesignerState;
+  commandPalette?: React.ReactNode;
   children?: React.ReactNode;
 }
 
@@ -81,10 +84,22 @@ const MUST_LOAD: ResourceName[] = [
 
 export class RawApp extends React.Component<AppProps, {}> {
   private _isMounted = false;
+  private mapLandingPanelClosed = false;
   private get isLoaded() {
     return (MUST_LOAD.length ===
       intersection(this.props.loaded, MUST_LOAD).length);
   }
+
+  closePanelForMapPage = () => {
+    const landingPage = this.props.getConfigValue(StringSetting.landing_page);
+    if (!this.mapLandingPanelClosed &&
+      (Path.equals(Path.designer()) ||
+        ((Path.equals("") || Path.equals(Path.app())) &&
+          landingPage == "map"))) {
+      this.props.dispatch(setPanelOpen(false));
+      this.mapLandingPanelClosed = true;
+    }
+  };
 
   /**
  * If the sync object takes more than 10s to load, the user will be granted
@@ -92,14 +107,20 @@ export class RawApp extends React.Component<AppProps, {}> {
  */
   componentDidMount() {
     this._isMounted = true;
+    this.closePanelForMapPage();
     setTimeout(() => {
       if (this._isMounted && !this.isLoaded) {
         error(t(Content.APP_LOAD_TIMEOUT_MESSAGE), { title: t("Warning") });
       }
     }, LOAD_TIME_FAILURE_MS);
     const browser = Bowser.getParser(window.navigator.userAgent);
-    !browser.satisfies({ chrome: ">85", firefox: ">75", edge: ">85" }) &&
+    /** css :has() support */
+    !browser.satisfies({ chrome: ">=105", firefox: ">=121", edge: ">=105" }) &&
       warning(t(Content.UNSUPPORTED_BROWSER));
+  }
+
+  componentDidUpdate() {
+    this.closePanelForMapPage();
   }
 
   componentWillUnmount() {
@@ -116,6 +137,7 @@ export class RawApp extends React.Component<AppProps, {}> {
         <Navigate to={landingPagePath(landingPage)} />}
       {!syncLoaded && <LoadingPlant animate={this.props.animate} />}
       <HotKeys dispatch={dispatch} designer={this.props.designer} />
+      {syncLoaded && (this.props.commandPalette ?? <CommandPalette />)}
       {syncLoaded && <NavBar />}
       <main id="main-content" tabIndex={-1}>
         {syncLoaded && this.props.children}

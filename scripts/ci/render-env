@@ -1,0 +1,17 @@
+render_env_config="${RENDER_ENV_CONFIG:-scripts/ci/render-env.json}"
+RENDER_ENV_NAMES=()
+while IFS=$'\t' read -r name default_value; do
+  RENDER_ENV_NAMES+=("$name")
+  if [ -z "${!name:-}" ]; then
+    printf -v "$name" '%s' "$default_value"
+  fi
+done < <(
+  python3 -c \
+    'import json, sys; print("\n".join(f"{key}\t{value}" for key, value in json.load(open(sys.argv[1])).items()))' \
+    "$render_env_config"
+)
+
+: "${CHOSEN_IMAGE:=${SCREENSHOT_NAME}_${CHOSEN_NAME}}"
+: "${CHOSEN_FPS:=${FPS_SAMPLES_NAME}_${CHOSEN_NAME}}"
+: "${CHOSEN_METRICS:=${SCENE_METRICS_NAME}_${CHOSEN_NAME}}"
+RENDER_ENV_NAMES+=(CHOSEN_IMAGE CHOSEN_FPS CHOSEN_METRICS)

@@ -27,6 +27,7 @@ FarmBot::Application.routes.draw do
       sequences: [:create, :destroy, :index, :show, :update],
       telemetries: [:create, :destroy, :index, :show],
       featured_sequences: [:index],
+      scene_objects: [:create, :destroy, :index, :show, :update],
       sequence_versions: [:show],
       tools: [:create, :destroy, :index, :show, :update],
       webcam_feeds: [:create, :destroy, :index, :show, :update],
@@ -137,5 +138,7 @@ FarmBot::Application.routes.draw do
   get "/verify/:token" => "dashboard#confirmation_page", as: :confirmation_page
   post "/csp_reports" => "dashboard#csp_reports", as: :csp_report
   post "/direct_upload" => "dashboard#direct_upload", as: :direct_upload
+  get "/direct_upload/temp/:filename.jpg" => "dashboard#direct_upload_file",
+      as: :direct_upload_file
   post "/webhooks" => "webhooks#create", as: :webhooks
 end

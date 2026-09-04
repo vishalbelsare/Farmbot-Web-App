@@ -9,23 +9,32 @@ import { Actions } from "../../../constants";
 import { mockDispatch } from "../../../__test_support__/fake_dispatch";
 import * as mapUtil from "../../../farm_designer/map/util";
 import { Mode } from "../../../farm_designer/map/interfaces";
+import { useFrame } from "@react-three/fiber";
+import { useTexture } from "@react-three/drei";
+import { DoubleSide, Quaternion } from "three";
 import {
   createRenderer,
   unmountRenderer,
 } from "../../../__test_support__/test_renderer";
+import { MeshPhongMaterial } from "../../components";
 
 describe("<Weed />", () => {
   let getModeSpy: jest.SpyInstance;
+  let reactUseRefSpy: jest.SpyInstance | undefined;
   const mountedWrappers: ReturnType<typeof createRenderer>[] = [];
 
   beforeEach(() => {
     getModeSpy = jest.spyOn(mapUtil, "getMode").mockReturnValue(Mode.none);
+    (useFrame as jest.Mock).mockClear();
+    (useTexture as unknown as jest.Mock).mockClear();
   });
 
   afterEach(() => {
     mountedWrappers.splice(0).forEach(wrapper =>
       unmountRenderer(wrapper));
     getModeSpy.mockRestore();
+    reactUseRefSpy?.mockRestore();
+    reactUseRefSpy = undefined;
   });
 
   const fakeProps = (): WeedProps => ({
@@ -36,8 +45,16 @@ describe("<Weed />", () => {
   });
 
   it("renders", () => {
-    const { container } = render(<Weed {...fakeProps()} />);
-    expect(container).toContainHTML("weed");
+    const p = fakeProps();
+    p.weed.body.meta.color = "purple";
+    const wrapper = createRenderer(<Weed {...p} />);
+    mountedWrappers.push(wrapper);
+    const weed = wrapper.root.findAll(node =>
+      node.props.name == `weed-${p.weed.body.id}`)[0];
+    const material = wrapper.root.findByType(MeshPhongMaterial);
+
+    expect(weed).toBeDefined();
+    expect(material.props.side).toEqual(DoubleSide);
   });
 
   it("renders mirrored position", () => {
@@ -49,7 +66,7 @@ describe("<Weed />", () => {
     p.weed.body.x = 100;
     p.weed.body.y = 200;
     const { container } = render(<Weed {...p} />);
-    expect(container).toContainHTML("position=\"1260,460,400\"");
+    expect(container).toContainHTML("position=\"1250,460,400\"");
   });
 
   it("navigates to weed info", () => {
@@ -64,6 +81,47 @@ describe("<Weed />", () => {
       type: Actions.SET_PANEL_OPEN, payload: true,
     });
     expect(mockNavigate).toHaveBeenCalledWith(Path.weeds("1"));
+  });
+
+  it("selects a weed object instead of navigating when handler is present", () => {
+    const p = fakeProps();
+    p.dispatch = mockDispatch(jest.fn());
+    p.onSelectObject = jest.fn();
+    p.weed.body.id = 1;
+    const { container } = render(<Weed {...p} />);
+    const weed = container.querySelector("[name='weed-1']");
+    weed && fireEvent.click(weed);
+    expect(p.onSelectObject).toHaveBeenCalledWith({ kind: "weed", id: 1 });
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("hovers a weed", () => {
+    const p = fakeProps();
+    p.onHoverObject = jest.fn();
+    p.onHoverLabel = jest.fn();
+    p.weed.body.id = 1;
+    const { container } = render(<Weed {...p} />);
+    const weed = container.querySelector("[name='weed-1']");
+    weed && fireEvent.pointerOver(weed);
+    weed && fireEvent.pointerOut(weed);
+    expect(p.onHoverObject).toHaveBeenCalledWith(true);
+    expect(p.onHoverObject).toHaveBeenCalledWith(false);
+    expect(p.onHoverLabel).toHaveBeenCalledWith({ kind: "weed", id: 1 });
+    expect(p.onHoverLabel).toHaveBeenCalledWith(undefined);
+  });
+
+  it("doesn't navigate after orbiting over a weed", () => {
+    const p = fakeProps();
+    const dispatch = jest.fn();
+    p.dispatch = mockDispatch(dispatch);
+    p.weed.body.id = 1;
+    const wrapper = createRenderer(<Weed {...p} />);
+    mountedWrappers.push(wrapper);
+    const weed = wrapper.root
+      .findAll(node => node.props.name == "weed-1")[0];
+    weed.props.onClick({ delta: 3 });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 
   it("doesn't navigate to weed info", () => {
@@ -84,12 +142,83 @@ describe("<Weed />", () => {
   });
 
   it("renders instanced weeds", () => {
-    const wrapper = createRenderer(<WeedInstances {...fakeInstanceProps()} />);
+    const p = fakeInstanceProps();
+    p.weeds[0].body.meta.color = "red";
+    p.weeds[1].body.meta.color = "blue";
+    const wrapper = createRenderer(<WeedInstances {...p} />);
     mountedWrappers.push(wrapper);
-    const meshes = wrapper.root.findAll(node => node.type == "instancedMesh");
-    expect(meshes.length).toEqual(2);
+    const meshes = wrapper.root.findAll(node =>
+      (node.type as string) == "instancedMesh");
+    expect(meshes.length).toEqual(3);
     expect(meshes[0].props.name).toEqual("weed-icons");
     expect(meshes[1].props.name).toEqual("weed-radius");
+    expect(meshes[2].props.name).toEqual("weed-radius");
+    const radiusMaterials = meshes.slice(1).flatMap(mesh =>
+      mesh.findAllByType(MeshPhongMaterial));
+    expect(radiusMaterials).toHaveLength(2);
+    radiusMaterials.map(material =>
+      expect(material.props.side).toEqual(DoubleSide));
+  });
+
+  it("buckets weed radii by color", () => {
+    const p = fakeInstanceProps();
+    p.weeds[0].body.meta.color = "red";
+    p.weeds[1].body.meta.color = "blue";
+    const wrapper = createRenderer(<WeedInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const radiusMeshes = wrapper.root.findAll(node =>
+      (node.type as string) == "instancedMesh" &&
+      node.props.name == "weed-radius");
+    expect(radiusMeshes.length).toEqual(2);
+    expect(radiusMeshes.map(radius => radius.props.args[2])).toEqual([1, 1]);
+    const colors = radiusMeshes.flatMap(radius =>
+      radius.findAll(node => node.props.color)
+        .map(node => node.props.color));
+    expect([...new Set(colors)].sort()).toEqual([
+      "blue", "red",
+    ]);
+  });
+
+  it("skips hidden weed instances", () => {
+    const p = fakeInstanceProps();
+    p.visible = false;
+    p.getZ = jest.fn();
+    const { container } = render(<WeedInstances {...p} />);
+    expect(container.querySelectorAll("instancedmesh").length).toBe(0);
+    expect(p.getZ).not.toHaveBeenCalled();
+  });
+
+  it("skips empty visible weed instances", () => {
+    const p = fakeInstanceProps();
+    p.weeds = [];
+    const { container } = render(<WeedInstances {...p} />);
+    expect(container.querySelectorAll("instancedmesh").length).toBe(0);
+    expect(useTexture).not.toHaveBeenCalled();
+    expect(useFrame).not.toHaveBeenCalled();
+  });
+
+  it("memoizes weed instances across unrelated config churn", () => {
+    const p = fakeInstanceProps();
+    p.weeds[0].body.meta.color = "red";
+    p.weeds[1].body.meta.color = "blue";
+    p.getZ = jest.fn(() => 0);
+    const { container, rerender } = render(<WeedInstances {...p} />);
+    expect(container.querySelectorAll("instancedmesh").length).toBe(3);
+    expect(p.getZ).toHaveBeenCalledTimes(2);
+
+    rerender(<WeedInstances {...p} config={{
+      ...p.config,
+      heading: p.config.heading + 10,
+      label: "unrelated config churn",
+    }} />);
+    expect(container.querySelectorAll("instancedmesh").length).toBe(3);
+    expect(p.getZ).toHaveBeenCalledTimes(2);
+
+    rerender(<WeedInstances {...p} config={{
+      ...p.config,
+      mirrorX: !p.config.mirrorX,
+    }} />);
+    expect(p.getZ).toHaveBeenCalledTimes(4);
   });
 
   it("navigates from a weed instance", () => {
@@ -101,10 +230,116 @@ describe("<Weed />", () => {
     mountedWrappers.push(wrapper);
     const weedIcons = wrapper.root
       .findAll(node => node.props.name == "weed-icons")[0];
-    weedIcons.props.onClick({ instanceId: 0 });
+    const event = { instanceId: 0, stopPropagation: jest.fn() };
+    weedIcons.props.onClick(event);
     expect(dispatch).toHaveBeenCalledWith({
       type: Actions.SET_PANEL_OPEN, payload: true,
     });
     expect(mockNavigate).toHaveBeenCalledWith(Path.weeds("1"));
+    expect(event.stopPropagation).toHaveBeenCalled();
+  });
+
+  it("selects a weed icon instead of navigating when handler is present", () => {
+    const p = fakeInstanceProps();
+    p.dispatch = mockDispatch(jest.fn());
+    p.onSelectObject = jest.fn();
+    p.weeds[0].body.id = 1;
+    const wrapper = createRenderer(<WeedInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const weedIcons = wrapper.root
+      .findAll(node => node.props.name == "weed-icons")[0];
+    weedIcons.props.onClick({ instanceId: 0 });
+    expect(p.onSelectObject).toHaveBeenCalledWith({ kind: "weed", id: 1 });
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("doesn't navigate from a missing weed instance", () => {
+    const p = fakeInstanceProps();
+    p.dispatch = mockDispatch(jest.fn());
+    const wrapper = createRenderer(<WeedInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const weedIcons = wrapper.root
+      .findAll(node => node.props.name == "weed-icons")[0];
+    const event = { instanceId: 99, stopPropagation: jest.fn() };
+    weedIcons.props.onClick(event);
+    expect(event.stopPropagation).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps weed radius instances inert", () => {
+    const p = fakeInstanceProps();
+    p.dispatch = mockDispatch(jest.fn());
+    p.onSelectObject = jest.fn();
+    p.onHoverObject = jest.fn();
+    const wrapper = createRenderer(<WeedInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const weedRadius = wrapper.root
+      .findAll(node => node.props.name == "weed-radius")[0];
+    expect(weedRadius.props.onClick).toBeUndefined();
+    expect(weedRadius.props.onPointerOver).toBeUndefined();
+    expect(weedRadius.props.onPointerOut).toBeUndefined();
+    expect(weedRadius.props.raycast()).toBeUndefined();
+    expect(p.onSelectObject).not.toHaveBeenCalled();
+    expect(p.onHoverObject).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("hovers weed instances", () => {
+    const p = fakeInstanceProps();
+    p.onHoverObject = jest.fn();
+    p.onHoverLabel = jest.fn();
+    p.weeds[0].body.id = 1;
+    const wrapper = createRenderer(<WeedInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const weedIcons = wrapper.root
+      .findAll(node => node.props.name == "weed-icons")[0];
+    weedIcons.props.onPointerOver({ instanceId: 0 });
+    weedIcons.props.onPointerOut();
+    expect(p.onHoverObject).toHaveBeenCalledWith(true);
+    expect(p.onHoverObject).toHaveBeenCalledWith(false);
+    expect(p.onHoverLabel).toHaveBeenCalledWith({ kind: "weed", id: 1 });
+    expect(p.onHoverLabel).toHaveBeenCalledWith(undefined);
+  });
+
+  it("doesn't navigate after orbiting over weed instances", () => {
+    const p = fakeInstanceProps();
+    const dispatch = jest.fn();
+    p.dispatch = mockDispatch(dispatch);
+    p.weeds[0].body.id = 1;
+    const wrapper = createRenderer(<WeedInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const weedIcons = wrapper.root
+      .findAll(node => node.props.name == "weed-icons")[0];
+    weedIcons.props.onClick({ instanceId: 0, delta: 3 });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("updates weed icon matrices on frame", () => {
+    const iconRef = {
+      current: {
+        setMatrixAt: jest.fn(),
+        instanceMatrix: { needsUpdate: false },
+      },
+    };
+    const radiusRef = {
+      current: {
+        setMatrixAt: jest.fn(),
+        setColorAt: jest.fn(),
+        instanceMatrix: { needsUpdate: false },
+      },
+    };
+    const updateStateRef = { current: {} };
+    reactUseRefSpy = jest.spyOn(React, "useRef")
+      .mockImplementationOnce(() => iconRef)
+      .mockImplementationOnce(() => updateStateRef)
+      .mockImplementationOnce(() => radiusRef)
+      .mockImplementation(value => ({ current: value }));
+    const wrapper = createRenderer(<WeedInstances {...fakeInstanceProps()} />);
+    mountedWrappers.push(wrapper);
+    const frameFn = (useFrame as jest.Mock).mock.calls[0][0];
+    frameFn({ camera: { quaternion: new Quaternion() } });
+    expect(iconRef.current.setMatrixAt).toHaveBeenCalled();
+    expect(iconRef.current.instanceMatrix.needsUpdate).toEqual(true);
   });
 });

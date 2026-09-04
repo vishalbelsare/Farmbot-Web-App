@@ -2,7 +2,7 @@ let mockAtMax = false;
 let mockAtMin = false;
 
 import React from "react";
-import { fireEvent, render } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import {
   GardenMapLegend, ZoomControls, PointsSubMenu, FarmbotSubMenu,
   PlantsSubMenu, MapSettingsContent, SettingsSubMenuProps,
@@ -23,11 +23,14 @@ import {
 } from "../../../../__test_support__/fake_state/resources";
 import { fakeDesignerState } from "../../../../__test_support__/fake_designer_state";
 import { Actions } from "../../../../constants";
+import * as screenSize from "../../../../screen_size";
+import { EggKeys } from "../../easter_eggs/status";
 
 let atMaxZoomSpy: jest.SpyInstance;
 let atMinZoomSpy: jest.SpyInstance;
 let getWebAppConfigValueSpy: jest.SpyInstance;
 let setWebAppConfigValueSpy: jest.SpyInstance;
+let isMobileSpy: jest.SpyInstance;
 
 beforeEach(() => {
   atMaxZoomSpy = jest.spyOn(zoom, "atMaxZoom").mockImplementation(() => mockAtMax);
@@ -36,6 +39,7 @@ beforeEach(() => {
     .mockImplementation(() => () => false);
   setWebAppConfigValueSpy = jest.spyOn(configStorageActions, "setWebAppConfigValue")
     .mockImplementation(jest.fn());
+  isMobileSpy = jest.spyOn(screenSize, "isMobile").mockReturnValue(false);
 });
 
 afterEach(() => {
@@ -43,6 +47,7 @@ afterEach(() => {
   atMinZoomSpy.mockRestore();
   getWebAppConfigValueSpy.mockRestore();
   setWebAppConfigValueSpy.mockRestore();
+  isMobileSpy.mockRestore();
 });
 
 describe("<GardenMapLegend />", () => {
@@ -60,6 +65,7 @@ describe("<GardenMapLegend />", () => {
     showZones: false,
     showSensorReadings: false,
     showMoistureInterpolationMap: false,
+    showSceneObjects: false,
     dispatch: jest.fn(),
     timeSettings: fakeTimeSettings(),
     getConfigValue: jest.fn(),
@@ -69,6 +75,7 @@ describe("<GardenMapLegend />", () => {
     firmwareConfig: fakeFirmwareConfig().body,
     botLocationData: fakeBotLocationData(),
     botSize: fakeBotSize(),
+    gardenSize: { x: 2900, y: 1400 },
     designer: fakeDesignerState(),
   });
 
@@ -78,8 +85,85 @@ describe("<GardenMapLegend />", () => {
       expect((container.textContent || "").toLowerCase()).toContain(string));
     expect(container.innerHTML).toContain("filter");
     expect(container.innerHTML).toContain("extras");
+    expect(container.querySelector("button[title='zoom in']"))
+      .toBeInTheDocument();
     expect(container.innerHTML).not.toContain("-100");
+    expect(container.querySelector("button[title='show Spread']"))
+      .not.toBeInTheDocument();
     expect((container.textContent || "").toLowerCase()).not.toContain("3d map");
+  });
+
+  it("hides zoom controls in 3D", () => {
+    const p = fakeProps();
+    p.getConfigValue = setting => setting === BooleanSetting.three_d_garden;
+    const { container } = render(<GardenMapLegend {...p} />);
+    expect(container.querySelector("button[title='zoom in']"))
+      .not.toBeInTheDocument();
+    expect(screen.getByTitle("show Areas")).not.toHaveClass("disabled");
+  });
+
+  it("highlights clickable objects while hovering over help", () => {
+    const p = fakeProps();
+    p.getConfigValue = key => key == BooleanSetting.three_d_garden;
+    render(<GardenMapLegend {...p} />);
+    const help = screen.getByTitle("Highlight clickable objects in the map");
+    expect(help.style.fontSize).toEqual("2rem");
+    fireEvent.mouseEnter(help);
+    expect(p.dispatch).toHaveBeenCalledWith({
+      type: Actions.SET_3D_HIGHLIGHT,
+      payload: "all",
+    });
+    fireEvent.mouseLeave(help);
+    expect(p.dispatch).toHaveBeenCalledWith({
+      type: Actions.SET_3D_HIGHLIGHT,
+      payload: undefined,
+    });
+  });
+
+  it("hides clickable object help in 2D", () => {
+    render(<GardenMapLegend {...fakeProps()} />);
+    expect(screen.queryByTitle("Highlight clickable objects in the map"))
+      .not.toBeInTheDocument();
+  });
+
+  it("toggles mobile area selection mode after select", () => {
+    isMobileSpy.mockReturnValue(true);
+    const p = fakeProps();
+    p.getConfigValue = key => key == BooleanSetting.three_d_garden;
+    const { rerender } = render(<GardenMapLegend {...p} />);
+    const select = screen.getByText(/^select$/i).closest("div");
+    const selectArea = screen.getByRole("button", { name: /select area/i });
+
+    expect(select?.nextElementSibling).toContainElement(selectArea);
+    expect(selectArea).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(selectArea);
+    expect(p.dispatch).toHaveBeenCalledWith({
+      type: Actions.SET_3D_AREA_SELECTION_MODE,
+      payload: true,
+    });
+
+    p.designer.threeDAreaSelectionMode = true;
+    rerender(<GardenMapLegend {...p} />);
+    expect(selectArea).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(selectArea);
+    expect(p.dispatch).toHaveBeenLastCalledWith({
+      type: Actions.SET_3D_AREA_SELECTION_MODE,
+      payload: false,
+    });
+  });
+
+  it("hides area selection mode off mobile and in 2D", () => {
+    const p = fakeProps();
+    p.getConfigValue = key => key == BooleanSetting.three_d_garden;
+    const { rerender } = render(<GardenMapLegend {...p} />);
+    expect(screen.queryByRole("button", { name: /select area/i }))
+      .not.toBeInTheDocument();
+
+    isMobileSpy.mockReturnValue(true);
+    p.getConfigValue = jest.fn(() => false);
+    rerender(<GardenMapLegend {...p} />);
+    expect(screen.queryByRole("button", { name: /select area/i }))
+      .not.toBeInTheDocument();
   });
 
   it("renders with readings", () => {
@@ -88,12 +172,33 @@ describe("<GardenMapLegend />", () => {
     expect((container.textContent || "").toLowerCase()).toContain("readings");
   });
 
+  it("shows spread in the plants extras menu", () => {
+    render(<GardenMapLegend {...fakeProps()} />);
+
+    fireEvent.click(screen.getAllByLabelText("extras")[0]);
+
+    expect(screen.getByTitle("Spread")).toBeInTheDocument();
+  });
+
+  it("shows grid and bounds in the FarmBot extras menu in 3D", () => {
+    const p = fakeProps();
+    p.getConfigValue = key => key == BooleanSetting.three_d_garden;
+    p.get3DConfigValue = jest.fn(() => 1);
+    p.set3DConfigValue = jest.fn();
+    render(<GardenMapLegend {...p} />);
+
+    fireEvent.click(screen.getAllByLabelText("extras")[2]);
+
+    expect(screen.getByTitle("Grid")).toBeInTheDocument();
+    expect(screen.getByTitle("Bounds")).toBeInTheDocument();
+  });
+
   it("renders z display", () => {
     const { container } = render(<GardenMapLegend {...fakeProps()} />);
     const beforeHasZDisplay =
       !!container.querySelector(".z-display") || container.innerHTML.includes("-100");
     expect(beforeHasZDisplay).toBeFalsy();
-    const toggle = container.querySelector("button[title='show z display']");
+    const toggle = container.querySelector("button[title='show Z info']");
     if (!toggle) {
       expect(container.querySelectorAll("button").length > 0).toBeTruthy();
       return;
@@ -103,6 +208,114 @@ describe("<GardenMapLegend />", () => {
       !!container.querySelector(".z-display") || container.innerHTML.includes("-100");
     const mockToggleOnly = !!container.querySelector(".mock-toggle-button");
     expect(afterHasZDisplay || mockToggleOnly).toBeTruthy();
+  });
+
+  it("hides z info and an open z display in 3D", () => {
+    const p = fakeProps();
+    const { container, rerender } = render(<GardenMapLegend {...p} />);
+    const toggle = container.querySelector("button[title='show Z info']");
+    if (!toggle) { throw new Error("Missing Z info toggle"); }
+    fireEvent.click(toggle);
+    expect(container.querySelector(".z-display")).toBeInTheDocument();
+
+    p.getConfigValue = setting =>
+      setting == BooleanSetting.three_d_garden;
+    rerender(<GardenMapLegend {...p} />);
+
+    expect(container.querySelector("button[title='hide Z info']"))
+      .not.toBeInTheDocument();
+    expect(container.querySelector(".z-display")).not.toBeInTheDocument();
+  });
+
+  it("renders 3D controls off", () => {
+    const { container } = render(<GardenMapLegend {...fakeProps()} />);
+    expect(container.textContent).toContain("3D");
+    expect(container.textContent).not.toContain("Top down");
+    expect(container.textContent).not.toContain("Amplify Z");
+  });
+
+  it("toggles 3D view", () => {
+    const { container } = render(<GardenMapLegend {...fakeProps()} />);
+    const toggle = container.querySelector("button[title='show 3D']");
+    if (!toggle) { throw new Error("Missing 3D toggle"); }
+    fireEvent.click(toggle);
+    expect(setWebAppConfigValueSpy).toHaveBeenCalledWith(
+      BooleanSetting.three_d_garden, true);
+  });
+
+  it("disables bugs when disabling 3D view", () => {
+    localStorage.setItem(EggKeys.BRING_ON_THE_BUGS, "true");
+    const p = fakeProps();
+    p.getConfigValue = key => key == BooleanSetting.three_d_garden;
+    const { container } = render(<GardenMapLegend {...p} />);
+    const toggle = container.querySelector("button[title='hide 3D']");
+    if (!toggle) { throw new Error("Missing 3D toggle"); }
+    fireEvent.click(toggle);
+    expect(localStorage.getItem(EggKeys.BRING_ON_THE_BUGS)).toEqual("");
+    expect(setWebAppConfigValueSpy).toHaveBeenCalledWith(
+      BooleanSetting.three_d_garden, false);
+  });
+
+  it("toggles 3D section view", () => {
+    const p = fakeProps();
+    p.getConfigValue = key => key == BooleanSetting.three_d_garden;
+    p.designer.threeDSectionOpen = true;
+    const { container } = render(<GardenMapLegend {...p} />);
+    const toggle = container.querySelector("button[title='hide SECTION']");
+    if (!toggle) { throw new Error("Missing section toggle"); }
+    fireEvent.click(screen.getByLabelText("section settings"));
+    expect(screen.getByText("CLIP ALL")).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(p.dispatch).toHaveBeenCalledWith({
+      type: Actions.SET_3D_SECTION_OPEN,
+      payload: false,
+    });
+  });
+
+  it("only shows section view in 3D", () => {
+    const p = fakeProps();
+    const { container, rerender } = render(<GardenMapLegend {...p} />);
+    expect(container.querySelector("button[title='show SECTION']")).toBeNull();
+    p.getConfigValue = key => key == BooleanSetting.three_d_garden;
+    rerender(<GardenMapLegend {...p} />);
+    expect(container.querySelector("button[title='show SECTION']"))
+      .toBeInTheDocument();
+  });
+
+  it("disables exaggerated z", () => {
+    const p = fakeProps();
+    p.getConfigValue = key => key == BooleanSetting.three_d_garden;
+    p.designer.threeDExaggeratedZ = true;
+    const { container } = render(<GardenMapLegend {...p} />);
+    const toggle = container.querySelector("button[title='hide Amplify Z']");
+    if (!toggle) { throw new Error("Missing amplify z toggle"); }
+    fireEvent.click(toggle);
+    expect(p.dispatch).toHaveBeenCalledWith({
+      type: Actions.TOGGLE_3D_EXAGGERATED_Z,
+      payload: false,
+    });
+  });
+
+  it("enables exaggerated z", () => {
+    const p = fakeProps();
+    p.getConfigValue = key => key == BooleanSetting.three_d_garden;
+    const { container } = render(<GardenMapLegend {...p} />);
+    const toggle = container.querySelector("button[title='show Amplify Z']");
+    if (!toggle) { throw new Error("Missing amplify z toggle"); }
+    fireEvent.click(toggle);
+    expect(p.dispatch).toHaveBeenCalledWith({
+      type: Actions.TOGGLE_3D_EXAGGERATED_Z,
+      payload: true,
+    });
+  });
+
+  it("shows 3D controls help", () => {
+    const p = fakeProps();
+    p.getConfigValue = key => key == BooleanSetting.three_d_garden;
+    render(<GardenMapLegend {...p} />);
+    fireEvent.click(screen.getByLabelText("3D help"));
+    expect(screen.getByText("3D Controls")).toBeInTheDocument();
+    expect(screen.getByText("Scroll to zoom")).toBeInTheDocument();
   });
 });
 
@@ -157,13 +370,31 @@ describe("<PointsSubMenu />", () => {
 
 describe("<PlantsSubMenu />", () => {
   it("shows plants settings", () => {
-    const { container } = render(<PlantsSubMenu {...fakeProps()} />);
-    const toggleBtn = container.querySelector("button");
+    const { container } = render(<PlantsSubMenu
+      {...fakeProps()}
+      showSpread={false}
+      toggle={jest.fn()} />);
+    const toggleBtn =
+      container.querySelector("button[title='Plant animations']");
     if (!toggleBtn) { throw new Error("Missing plants submenu toggle"); }
     expect(["no", "false"]).toContain((toggleBtn.textContent || "").toLowerCase());
     fireEvent.click(toggleBtn);
     expect(setWebAppConfigValueSpy).toHaveBeenCalledWith(
       BooleanSetting.disable_animations, false);
+  });
+
+  it("toggles spread", () => {
+    const toggleAction = jest.fn();
+    const toggle = jest.fn(() => toggleAction);
+    render(<PlantsSubMenu
+      {...fakeProps()}
+      showSpread={true}
+      toggle={toggle} />);
+
+    fireEvent.click(screen.getByTitle("Spread"));
+
+    expect(toggle).toHaveBeenCalledWith(BooleanSetting.show_spread);
+    expect(toggleAction).toHaveBeenCalled();
   });
 });
 
@@ -176,6 +407,42 @@ describe("<FarmbotSubMenu />", () => {
     fireEvent.click(toggleBtn);
     expect(setWebAppConfigValueSpy).toHaveBeenCalledWith(
       BooleanSetting.display_trail, false);
+  });
+
+  it("toggles the 3D laser", () => {
+    const p = fakeProps();
+    p.get3DConfigValue = jest.fn(() => 1);
+    p.set3DConfigValue = jest.fn();
+    const { container } = render(<FarmbotSubMenu {...p} />);
+    const toggleBtn = container.querySelector("button[title='LASER']");
+    if (!toggleBtn) { throw new Error("Missing laser toggle"); }
+    fireEvent.click(toggleBtn);
+    expect(p.set3DConfigValue).toHaveBeenCalledWith("laser", "0");
+  });
+
+  it("toggles the 3D grid and bounds", () => {
+    const p = fakeProps();
+    p.get3DConfigValue = jest.fn(key => key == "grid" ? 1 : 0);
+    p.set3DConfigValue = jest.fn();
+    render(<FarmbotSubMenu {...p} />);
+
+    fireEvent.click(screen.getByTitle("Grid"));
+    fireEvent.click(screen.getByTitle("Bounds"));
+
+    expect(p.set3DConfigValue).toHaveBeenCalledWith("grid", "0");
+    expect(p.set3DConfigValue).toHaveBeenCalledWith("bounds", "1");
+  });
+
+  it("hides 3D controls when the 3D view is disabled", () => {
+    const p = fakeProps();
+    p.getConfigValue = () => false;
+    p.get3DConfigValue = jest.fn(() => 1);
+    p.set3DConfigValue = jest.fn();
+    render(<FarmbotSubMenu {...p} />);
+
+    expect(screen.queryByTitle("LASER")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Grid")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Bounds")).not.toBeInTheDocument();
   });
 });
 

@@ -1,6 +1,8 @@
 import React from "react";
 import { render } from "@testing-library/react";
-import { DistanceIndicator, DistanceIndicatorProps } from "../distance_indicator";
+import {
+  DistanceIndicator, distanceIndicatorPropsEqual, DistanceIndicatorProps,
+} from "../distance_indicator";
 
 describe("<DistanceIndicator />", () => {
   const fakeProps = (): DistanceIndicatorProps => ({
@@ -12,8 +14,29 @@ describe("<DistanceIndicator />", () => {
     const { container } = render(<DistanceIndicator {...fakeProps()} />);
     expect(container.innerHTML).toContain("box");
     expect(container.innerHTML).toContain("text");
-    expect(container.innerHTML).toContain("arrow");
+    expect(container.innerHTML).toContain("distance-arrow");
     expect(container.innerHTML).toContain("100mm");
-    expect(container.innerHTML).toContain("extrude");
+    expect(container.querySelectorAll(".cone")).toHaveLength(2);
+    expect(container.querySelectorAll(".cylinder")).toHaveLength(1);
+  });
+
+  it("compares distance-indicator geometry inputs", () => {
+    const p = fakeProps();
+    expect(distanceIndicatorPropsEqual(p, {
+      start: { ...p.start },
+      end: { ...p.end },
+    })).toBeTruthy();
+    expect(distanceIndicatorPropsEqual(p, {
+      ...p,
+      start: { ...p.start, x: p.start.x + 1 },
+    })).toBeFalsy();
+    expect(distanceIndicatorPropsEqual(p, {
+      ...p,
+      end: { ...p.end, z: p.end.z + 1 },
+    })).toBeFalsy();
+    expect(distanceIndicatorPropsEqual(p, {
+      ...p,
+      visible: false,
+    })).toBeFalsy();
   });
 });

@@ -1,16 +1,26 @@
 import React from "react";
 import { render } from "@testing-library/react";
-import { StarterTray, StarterTrays } from "../starter_tray";
-import { InstancedMesh } from "three";
+import {
+  StarterTray, StarterTrays, starterTraysPropsEqual,
+} from "../starter_tray";
+import { InstancedMesh, Matrix4, Quaternion, Vector3 } from "three";
+import * as threeFiber from "@react-three/fiber";
 
 const mockMesh = () => ({
   setMatrixAt: jest.fn(),
   instanceMatrix: { needsUpdate: false },
 }) as unknown as InstancedMesh;
 
+const dimensions = {
+  width: 700,
+  length: 250,
+  height: 50,
+  seedlingSize: 40,
+};
+
 describe("<StarterTray />", () => {
   it("renders a single starter tray", () => {
-    const { container } = render(<StarterTray />);
+    const { container } = render(<StarterTray size={[700, 250, 90]} />);
 
     expect(container).toContainHTML("starter-tray");
     expect(container).toContainHTML("starter-trays");
@@ -19,17 +29,55 @@ describe("<StarterTray />", () => {
 });
 
 describe("<StarterTrays />", () => {
+  it("doesn't render empty starter trays", () => {
+    const useFrameSpy = jest.spyOn(threeFiber, "useFrame")
+      .mockImplementation(() => undefined as never);
+    const { container } = render(<StarterTrays
+      positions={[]}
+      dimensions={dimensions} />);
+    expect(container).not.toContainHTML("starter-trays");
+    expect(useFrameSpy).not.toHaveBeenCalled();
+    useFrameSpy.mockRestore();
+  });
+
   it("renders instanced starter trays and seedlings", () => {
     const { container } = render(<StarterTrays positions={[
       [100, 200, 300],
       [400, 500, 600],
-    ]} />);
+    ]} dimensions={dimensions} />);
 
     expect(container).toContainHTML("starter-tray-bases");
     expect(container).toContainHTML("starter-tray-seedlings");
     expect(container.querySelectorAll("instancedmesh").length).toEqual(2);
     expect(container.querySelectorAll(".billboard").length).toEqual(0);
     expect(container.querySelectorAll(".image").length).toEqual(0);
+  });
+
+  it("compares starter tray positions", () => {
+    const positions: [number, number, number][] = [
+      [100, 200, 300],
+      [400, 500, 600],
+    ];
+    expect(starterTraysPropsEqual({ positions, dimensions }, {
+      positions: [
+        [100, 200, 300],
+        [400, 500, 600],
+      ],
+      dimensions,
+    })).toBeTruthy();
+    expect(starterTraysPropsEqual({ positions, dimensions }, {
+      positions: [
+        [100, 200, 300],
+      ],
+      dimensions,
+    })).toBeFalsy();
+    expect(starterTraysPropsEqual({ positions, dimensions }, {
+      positions: [
+        [100, 200, 300],
+        [400, 501, 600],
+      ],
+      dimensions,
+    })).toBeFalsy();
   });
 
   it("updates tray and seedling instance matrices", () => {
@@ -48,7 +96,7 @@ describe("<StarterTrays />", () => {
     render(<StarterTrays positions={[
       [100, 200, 300],
       [400, 500, 600],
-    ]} />);
+    ]} dimensions={dimensions} />);
 
     expect(trayMesh.setMatrixAt).toHaveBeenCalledTimes(2);
     expect(seedlingMesh.setMatrixAt).toHaveBeenCalledTimes(140);
@@ -56,5 +104,104 @@ describe("<StarterTrays />", () => {
     expect(seedlingMesh.instanceMatrix.needsUpdate).toBeTruthy();
     useRefSpy.mockRestore();
     useEffectSpy.mockRestore();
+  });
+
+  it("tiles a single tray to fit a bounding box", () => {
+    const { container } = render(<StarterTray size={[1400, 500, 180]} />);
+
+    expect(container.querySelector("group[name='starter-tray']"))
+      .not.toHaveAttribute("scale", "2,2,2");
+    expect(container.querySelector("group[position='0,0,-90']"))
+      .toBeTruthy();
+  });
+
+  it("tiles cells without stretching seedlings", () => {
+    const trayMesh = mockMesh();
+    const seedlingMesh = mockMesh();
+    const useRef = React.useRef;
+    const useEffectSpy = jest.spyOn(React, "useEffect")
+      .mockImplementationOnce(effect => {
+        effect();
+      });
+    const useRefSpy = jest.spyOn(React, "useRef")
+      .mockImplementationOnce(() => ({ current: trayMesh }))
+      .mockImplementationOnce(() => ({ current: seedlingMesh }))
+      .mockImplementation(useRef);
+
+    render(<StarterTrays
+      positions={[[0, 0, 0]]}
+      dimensions={{
+        width: 1400,
+        length: 500,
+        height: 140,
+        seedlingSize: 40,
+      }} />);
+
+    expect(trayMesh.setMatrixAt).toHaveBeenCalledTimes(1);
+    expect(seedlingMesh.setMatrixAt).toHaveBeenCalledTimes(280);
+    useRefSpy.mockRestore();
+    useEffectSpy.mockRestore();
+  });
+
+  it("updates seedling billboards for camera and parent rotation", () => {
+    const trayMesh = mockMesh();
+    const seedlingMesh = mockMesh();
+    const parentQuaternion = new Quaternion();
+    (seedlingMesh as unknown as {
+      parent: { getWorldQuaternion(target: Quaternion): Quaternion };
+    }).parent = {
+      getWorldQuaternion: target => target.copy(parentQuaternion),
+    };
+    const refs: React.RefObject<unknown>[] = [];
+    let frameFn: Parameters<typeof threeFiber.useFrame>[0] | undefined;
+    const useFrameSpy = jest.spyOn(threeFiber, "useFrame")
+      .mockImplementation(fn => {
+        frameFn = fn;
+        // eslint-disable-next-line no-null/no-null
+        return null;
+      });
+    const useRef = React.useRef;
+    const useRefSpy = jest.spyOn(React, "useRef")
+      .mockImplementation(initialValue => {
+        if (initialValue == undefined && refs.length < 2) {
+          const ref = { current: initialValue };
+          refs.push(ref);
+          return ref;
+        }
+        return useRef(initialValue);
+      });
+
+    render(<StarterTrays positions={[
+      [100, 200, 300],
+      [400, 500, 600],
+    ]} dimensions={dimensions} />);
+    refs[0].current = trayMesh;
+    refs[1].current = seedlingMesh;
+
+    const camera = { quaternion: new Quaternion() };
+    frameFn?.({ camera } as never, 0, undefined);
+    frameFn?.({ camera } as never, 0, undefined);
+    expect(seedlingMesh.setMatrixAt).toHaveBeenCalledTimes(140);
+
+    camera.quaternion.setFromAxisAngle(new Vector3(0, 0, 1), Math.PI / 4);
+    frameFn?.({ camera } as never, 0, undefined);
+    expect(seedlingMesh.setMatrixAt).toHaveBeenCalledTimes(280);
+
+    parentQuaternion.setFromAxisAngle(
+      new Vector3(0, 0, 1), Math.PI / 2);
+    frameFn?.({ camera } as never, 0, undefined);
+    expect(seedlingMesh.setMatrixAt).toHaveBeenCalledTimes(420);
+    const calls = (seedlingMesh.setMatrixAt as jest.Mock).mock.calls;
+    const matrix = calls[calls.length - 1][1] as Matrix4;
+    const instanceQuaternion = new Quaternion();
+    matrix.decompose(
+      new Vector3(), instanceQuaternion, new Vector3());
+    const worldQuaternion = parentQuaternion.clone()
+      .multiply(instanceQuaternion);
+    expect(Math.abs(worldQuaternion.dot(camera.quaternion)))
+      .toBeCloseTo(1);
+
+    useRefSpy.mockRestore();
+    useFrameSpy.mockRestore();
   });
 });

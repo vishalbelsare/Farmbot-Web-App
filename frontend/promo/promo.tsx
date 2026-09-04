@@ -3,8 +3,12 @@ import {
   Config, ConfigWithPosition, INITIAL, modifyConfigsFromUrlParams,
   PRESETS,
 } from "../three_d_garden/config";
-import { GardenModel } from "../three_d_garden/garden_model";
+import {
+  GardenModel, ViewPrismBridge,
+} from "../three_d_garden/garden_model";
+import { ViewPrismViewport } from "../three_d_garden";
 import { Canvas } from "@react-three/fiber";
+import { safePointerEvents } from "../three_d_garden/pointer_events";
 import {
   PrivateOverlay, PublicOverlay, ToolTip,
 } from "../three_d_garden/config_overlays";
@@ -20,6 +24,15 @@ import { calculatePointPositions } from "./points";
 import { SEASON_TIMINGS, SEASONS } from "./constants";
 import { isMobile } from "../screen_size";
 import { FocusTransitionProvider } from "../three_d_garden/focus_transition";
+import {
+  PROMO_PLANT_ICON_ATLAS,
+} from "../three_d_garden/garden/plant_icon_atlas";
+import {
+  getPromoResourcePlants, getPromoResourcePoints, getPromoResourceWeeds,
+} from "./resources";
+import { clearCameraUrlParams } from "../three_d_garden/camera";
+import { isWebGLAvailable, ThreeDRequiredOverlay } from
+  "../three_d_garden/three_d_required_overlay";
 
 const PROMO_BED_SIZES = [
   {
@@ -42,17 +55,13 @@ interface PromoPlantCapacities {
 const calcCacheKey = (config: Config): string =>
   `${config.bedLengthOuter}x${config.bedWidthOuter}: ${config.plants}`;
 
-const calcPlantsCache = (
+const addPlantsToCache = (
   cache: ThreeDPlantsCache,
   config: Config,
 ): ThreeDPlantsCache => {
-  const cacheKey = calcCacheKey(config);
-  if (cache[cacheKey]) {
-    return cache;
-  }
   return {
     ...cache,
-    [cacheKey]: calculatePlantPositions(config),
+    [calcCacheKey(config)]: calculatePlantPositions(config),
   };
 };
 
@@ -60,7 +69,7 @@ const prewarmPlantsCache = () => {
   let next = PLANTS_CACHE;
   PROMO_BED_SIZES.map(({ length, width }) => {
     SEASONS.map(season => {
-      next = calcPlantsCache(next, {
+      next = addPlantsToCache(next, {
         ...INITIAL,
         bedLengthOuter: length,
         bedWidthOuter: width,
@@ -76,8 +85,9 @@ const getCachedPlants = (config: Config) => {
   const cachedPlants = PLANTS_CACHE[cacheKey];
   if (cachedPlants) { return cachedPlants; }
 
-  Object.assign(PLANTS_CACHE, calcPlantsCache(PLANTS_CACHE, config));
-  return PLANTS_CACHE[cacheKey] || [];
+  const plants = calculatePlantPositions(config);
+  Object.assign(PLANTS_CACHE, { [cacheKey]: plants });
+  return plants;
 };
 
 export const getPromoPlantCapacities = (config: Config): PromoPlantCapacities => {
@@ -125,11 +135,32 @@ export const Promo = () => {
     return next;
   });
   const [toolTip, setToolTip] = React.useState<ToolTip>({ timeoutId: 0, text: "" });
-  const [activeFocus, setActiveFocus] = React.useState(() =>
-    getFocusFromUrlParams());
+  const [activeFocus, setActiveFocusState] = React.useState(
+    () => getFocusFromUrlParams());
+  const setActiveFocus = React.useCallback((focus: string) => {
+    if (focus != activeFocus) {
+      clearCameraUrlParams();
+    }
+    setActiveFocusState(focus);
+  }, [activeFocus]);
+  const exitFocus = React.useCallback(() => {
+    setActiveFocus("");
+    if (activeFocus) {
+      setUrlParam("focus", "");
+    }
+  }, [activeFocus, setActiveFocus]);
   const [threeDLoaded, setThreeDLoaded] = React.useState(false);
+  const [seasonAnimationPaused, setSeasonAnimationPaused] =
+    React.useState(false);
+  const startTimeRef = React.useRef<number>(0);
+  const seasonAnimationElapsedRef =
+    React.useRef<number | undefined>(undefined);
+  const [seasonResetKey, setSeasonResetKey] = React.useState(0);
+  const viewPrismBridgeRef = React.useRef<ViewPrismBridge | null>({});
   const handleThreeDLoadComplete = React.useCallback(() =>
     setThreeDLoaded(true), []);
+  const handleSeasonSelect = React.useCallback(() =>
+    setSeasonResetKey(key => key + 1), []);
   const common = {
     config, setConfig,
     toolTip, setToolTip,
@@ -138,17 +169,26 @@ export const Promo = () => {
 
   const mapPoints = React.useMemo<TaggedGenericPointer[]>(() =>
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    calculatePointPositions(config), [
+    getPromoResourcePoints() || calculatePointPositions(config), [
     config.soilSurface, config.soilHeight, config.soilSurfacePointCount,
     config.soilSurfaceVariance, config.bedXOffset, config.bedYOffset,
     config.bedWallThickness, config.bedLengthOuter, config.bedWidthOuter,
   ]);
 
-  const startTimeRef = React.useRef<number>(0);
+  React.useEffect(() => {
+    startTimeRef.current = performance.now() / 1000;
+  }, []);
 
   React.useEffect(() => {
     if (!config.animateSeasons) { return; }
     const currentSeasonTimings = getSeasonTimings(config.plants);
+    const totalSeconds =
+      currentSeasonTimings.duration + currentSeasonTimings.pause;
+    const elapsedSeconds = Math.min(
+      Math.max(performance.now() / 1000 - startTimeRef.current, 0),
+      totalSeconds,
+    );
+    const remainingSeconds = totalSeconds - elapsedSeconds;
     const timeout = setTimeout(() => {
       startTimeRef.current = performance.now() / 1000;
       setConfig(prevConfig => {
@@ -158,29 +198,25 @@ export const Promo = () => {
           plants: nextSeasonTimings.season,
         };
       });
-    }, (currentSeasonTimings.duration + currentSeasonTimings.pause) * 1000);
+    }, remainingSeconds * 1000);
     return () => clearTimeout(timeout);
   }, [config.plants, config.animateSeasons]);
-
-  React.useEffect(() => {
-    startTimeRef.current = performance.now() / 1000;
-  }, []);
 
   React.useEffect(() => {
     if (!activeFocus) { return; }
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key != "Escape") { return; }
-      setActiveFocus("");
-      setUrlParam("focus", "");
+      exitFocus();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [activeFocus]);
+  }, [activeFocus, exitFocus]);
 
   const plants = React.useMemo(() => {
-    return getCachedPlants(config);
+    return getPromoResourcePlants() || getCachedPlants(config);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config.plants, config.bedLengthOuter, config.bedWidthOuter]);
+  const weeds = React.useMemo(() => getPromoResourceWeeds() || [], []);
 
   const threeDPlants = React.useMemo(() => {
     return config.promoSpread
@@ -194,39 +230,68 @@ export const Promo = () => {
   }), [config.bedLengthOuter, config.bedWidthOuter]);
   const plantCapacities = React.useMemo(() =>
     getPromoPlantCapacities(plantCapacityConfig), [plantCapacityConfig]);
+  const gardenConfig = React.useMemo(() =>
+    seasonAnimationPaused
+      ? { ...config, animateSeasons: true }
+      : config, [config, seasonAnimationPaused]);
+  const webGLAvailable = React.useMemo(() => isWebGLAvailable(), []);
 
   return <div className={"three-d-garden promo"}>
     <div className={"garden-bed-3d-model"}>
       <FocusTransitionProvider enabled={config.animate}>
-        <MemoryRouter>
-          <Canvas
-            shadows={"variance"}
-            onCreated={({ gl }) => {
-              gl.localClippingEnabled = true;
-            }}>
-            <GardenModel {...common}
-              configPosition={{ x: config.x, y: config.y, z: config.z }}
-              startTimeRef={startTimeRef}
-              threeDPlants={threeDPlants}
-              mapPoints={mapPoints}
-              plantIconCapacities={plantCapacities.iconCapacities}
-              plantInstanceCapacity={plantCapacities.plantInstanceCapacity}
-              onLoadComplete={handleThreeDLoadComplete}
-              smoothFocusTransitions={true} />
-          </Canvas>
-        </MemoryRouter>
+        {webGLAvailable
+          ? <MemoryRouter>
+            <Canvas
+              events={safePointerEvents}
+              shadows={"variance"}
+              onCreated={({ gl }) => {
+                gl.localClippingEnabled = true;
+              }}>
+              <GardenModel {...common}
+                config={gardenConfig}
+                configPosition={{ x: config.x, y: config.y, z: config.z }}
+                startTimeRef={startTimeRef}
+                threeDPlants={threeDPlants}
+                mapPoints={mapPoints}
+                weeds={weeds}
+                plantIconCapacities={plantCapacities.iconCapacities}
+                plantIconAtlas={PROMO_PLANT_ICON_ATLAS}
+                plantInstanceCapacity={plantCapacities.plantInstanceCapacity}
+                seasonResetKey={seasonResetKey}
+                promo={true}
+                preloadEnvironmentScenes={true}
+                showFarmbotLayerLoadProgress={false}
+                onDetailsRevealStart={handleThreeDLoadComplete}
+                smoothFocusTransitions={true}
+                smoothConfigTransitions={true}
+                viewPrismBridgeRef={viewPrismBridgeRef} />
+            </Canvas>
+          </MemoryRouter>
+          : <ThreeDRequiredOverlay />}
         <PublicOverlay {...common}
-          loadComplete={threeDLoaded}
-          startTimeRef={startTimeRef} />
+          publicContentVisible={!activeFocus}
+          loadComplete={threeDLoaded || !webGLAvailable}
+          startTimeRef={startTimeRef}
+          seasonAnimationElapsedRef={seasonAnimationElapsedRef}
+          seasonAnimationPaused={seasonAnimationPaused}
+          setSeasonAnimationPaused={setSeasonAnimationPaused}
+          onSeasonSelect={handleSeasonSelect} />
         {!config.config &&
           <img className={"gear"} src={ASSETS.other.gear} title={"config"}
             onClick={() => setConfig({ ...config, config: true })} />}
         {config.config &&
-          <PrivateOverlay {...common} startTimeRef={startTimeRef} />}
+          <PrivateOverlay {...common}
+            startTimeRef={startTimeRef}
+            seasonAnimationElapsedRef={seasonAnimationElapsedRef}
+            seasonAnimationPaused={seasonAnimationPaused}
+            setSeasonAnimationPaused={setSeasonAnimationPaused}
+            onSeasonSelect={handleSeasonSelect} />}
         <span className={"tool-tip"} hidden={!toolTip.text}>
           {toolTip.text}
         </span>
       </FocusTransitionProvider>
     </div>
+    {config.viewCube && webGLAvailable &&
+      <ViewPrismViewport bridgeRef={viewPrismBridgeRef} />}
   </div>;
 };

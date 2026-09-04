@@ -11,14 +11,8 @@ export enum FarmBotRepo {
   FarmBotArduinoFirmware = "farmbot-arduino-firmware",
 }
 
-enum FbosFile {
-  featureMinVersions = "FEATURE_MIN_VERSIONS.json",
-  osReleaseNotes = "RELEASE_NOTES.md",
-}
-
 export namespace ExternalUrl {
   const GITHUB = "https://github.com";
-  const GITHUB_RAW = "https://raw.githubusercontent.com";
   const DOCS_HUB = "https://docs.farm.bot";
   const GENESIS_DOCS = "https://genesis.farm.bot";
   const EXPRESS_DOCS = "https://express.farm.bot";
@@ -28,6 +22,8 @@ export namespace ExternalUrl {
   const DEVELOPER_DOCS = "https://developer.farm.bot";
   const SOLAR = "https://solar.farm.bot";
   const RAISED_BED = "https://bed.farm.bot";
+  const BUY_FARMBOT = "https://buy.farm.bot";
+  const BLOG_FARMBOT = "https://blog.farm.bot";
   const FORUM = "https://forum.farmbot.org";
   const SHOPIFY_CDN = "https://cdn.shopify.com/s/files/1/2040/0289/files";
   const YOUTUBE = "https://www.youtube.com/embed/";
@@ -48,10 +44,10 @@ export namespace ExternalUrl {
 
   export const myFarmBot = MY_FARMBOT_WEB_APP;
 
-  const FBOS_RAW =
-    `${GITHUB_RAW}/${Org.FarmBot}/${FarmBotRepo.FarmBotOS}/staging`;
-  export const featureMinVersions = `${FBOS_RAW}/${FbosFile.featureMinVersions}`;
-  export const osReleaseNotes = `${FBOS_RAW}/${FbosFile.osReleaseNotes}`;
+  /** Fetched from GitHub upon build. */
+  export const featureMinVersions = "/FEATURE_MIN_VERSIONS.json";
+  /** Fetched from GitHub upon build. */
+  export const osReleaseNotes = "/RELEASE_NOTES.md";
 
   export const gitHubFarmBot = `${GITHUB}/${Org.FarmBot}`;
   export const webAppRepo = `${gitHubFarmBot}/${FarmBotRepo.FarmBotWebApp}`;
@@ -88,6 +84,9 @@ export namespace ExternalUrl {
   const KITS = `${FARMBOT}/collections/farmbot-kits/products`;
   export namespace Store {
     export const home = FARMBOT;
+    export const buyParts = `${FARMBOT}/collections`;
+    export const fullKits = BUY_FARMBOT;
+    export const blog = BLOG_FARMBOT;
     export const cameraCalibrationCard = `${PRODUCTS}/camera-calibration-card`;
     export const cameraReplacement =
       `${PRODUCTS}/genesis-v1-5-express-v1-0-camera-free-replacement`;
@@ -95,5 +94,9 @@ export namespace ExternalUrl {
       `${KITS}/farmbot-genesis-${version.replace(".", "-")}`;
     export const genesisXlKit = (version: string) =>
       `${KITS}/farmbot-genesis-xl-${version.replace(".", "-")}`;
+  }
+
+  export namespace Follow {
+    export const newsletter = "https://newsletter.farm.bot";
   }
 }

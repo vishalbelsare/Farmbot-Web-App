@@ -1,5 +1,5 @@
 import React from "react";
-import { CustomToolTop } from "../../../tools/custom_tool_graphics";
+import { CustomToolTop } from "../../../tools/custom_tool_graphics_display";
 import { Color } from "../../../ui";
 import { ToolGraphicProps } from "./interfaces";
 

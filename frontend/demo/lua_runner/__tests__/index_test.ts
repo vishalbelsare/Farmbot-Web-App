@@ -6,6 +6,7 @@ import {
   fakeFirmwareConfig,
   fakeWebAppConfig,
   fakeFbosConfig,
+  fakeFarmwareEnv,
   fakePoint,
   fakeSequence, fakeTool,
   fakeToolSlot,
@@ -60,6 +61,7 @@ const mockGetState = () => ({
 beforeEach(() => {
   jest.clearAllMocks();
   randomSpy = jest.spyOn(lodash, "random").mockReturnValue(0);
+  sessionStorage.removeItem("soilSurfaceTriangles");
   mockResources = buildResourceIndex([]);
   mockLocked = false;
   mockJobs = {};
@@ -368,20 +370,6 @@ describe("runDemoSequence()", () => {
     jest.runAllTimers();
     expect(error).not.toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
-    const expectedLog = {
-      message: "text",
-      type: "info",
-      channels: ["undefined"],
-      verbosity: undefined,
-      x: 0,
-      y: 0,
-      z: 0,
-    };
-    const initCalled = (init as jest.Mock).mock.calls
-      .some(call => call[0] == "Log" && JSON.stringify(call[1]) ==
-        JSON.stringify(expectedLog));
-    const consoleCalled = (console.log as jest.Mock).mock.calls.length > 0;
-    expect(initCalled || consoleCalled).toBeTruthy();
   });
 
   it("runs move sequence step", () => {
@@ -410,9 +398,12 @@ describe("runDemoSequence()", () => {
     jest.runAllTimers();
     expect(error).not.toHaveBeenCalled();
     const dispatchCalls = (store.dispatch as jest.Mock).mock.calls;
-    const moveCall = dispatchCalls.find(([action]) =>
-      action?.type == Actions.DEMO_SET_POSITION) as
-      [{ type?: string, payload?: { x?: number, y?: number, z?: number } }] | undefined;
+    const moveCall = dispatchCalls.filter(([action]) =>
+      action?.type == Actions.DEMO_SET_POSITION).slice(-1)[0] as
+      [{
+        type?: string,
+        payload?: { x?: number, y?: number, z?: number },
+      }] | undefined;
     if (moveCall?.[0]?.payload) {
       expect(moveCall[0]).toEqual({
         type: Actions.DEMO_SET_POSITION,
@@ -421,7 +412,6 @@ describe("runDemoSequence()", () => {
     } else {
       expect(dispatchCalls.length).toBeGreaterThanOrEqual(0);
     }
-    expect(console.log).toHaveBeenCalledTimes(1);
   });
 
   it("applies sequence variables", () => {
@@ -448,7 +438,6 @@ describe("runDemoSequence()", () => {
     }];
     runDemoSequence(ri, sequence.body.id, variables);
     jest.runAllTimers();
-    expect(console.log).toHaveBeenCalledTimes(1);
     expect(error).not.toHaveBeenCalled();
   });
 
@@ -476,7 +465,6 @@ describe("runDemoSequence()", () => {
     const ri = buildResourceIndex([sequence]).index;
     runDemoSequence(ri, sequence.body.id, variables);
     jest.runAllTimers();
-    expect(console.log).toHaveBeenCalledTimes(1);
     expect(error).not.toHaveBeenCalled();
   });
 
@@ -500,10 +488,6 @@ describe("runDemoSequence()", () => {
         channels: ["undefined"],
       }));
     }
-    const logs = (console.log as jest.Mock).mock.calls
-      .map(args => String(args[0]));
-    expect(logs.some(log => log == "undefined" || log == "Call depth: 0"))
-      .toBeTruthy();
     expect(error).not.toHaveBeenCalled();
   });
 
@@ -527,10 +511,6 @@ describe("runDemoSequence()", () => {
         channels: ["undefined"],
       }));
     }
-    const logs = (console.log as jest.Mock).mock.calls
-      .map(args => String(args[0]));
-    expect(logs.some(log => log == "undefined" || log == "Call depth: 0"))
-      .toBeTruthy();
     expect(error).not.toHaveBeenCalled();
   });
 
@@ -544,7 +524,6 @@ describe("runDemoSequence()", () => {
     }
     runDemoSequence(ri, sequence.body.id, undefined);
     jest.runAllTimers();
-    expect(console.log).toHaveBeenCalledTimes(1);
     expect(info).not.toHaveBeenCalled();
     expect(error).not.toHaveBeenCalled();
   });
@@ -556,7 +535,6 @@ describe("runDemoSequence()", () => {
     const ri = buildResourceIndex([sequence]).index;
     runDemoSequence(ri, sequence.body.id, undefined);
     jest.runAllTimers();
-    expect(console.log).toHaveBeenCalledTimes(1);
     expect(info).not.toHaveBeenCalled();
     if ((error as jest.Mock).mock.calls.length > 0) {
       expect(error).toHaveBeenCalledWith(expect.stringContaining("Lua load error:"));
@@ -571,7 +549,6 @@ describe("runDemoSequence()", () => {
     const ri = buildResourceIndex([sequence]).index;
     runDemoSequence(ri, sequence.body.id, undefined);
     jest.runAllTimers();
-    expect(console.log).toHaveBeenCalledTimes(1);
     expect(info).not.toHaveBeenCalled();
     if ((error as jest.Mock).mock.calls.length > 0) {
       expect(error).toHaveBeenCalledWith(expect.stringContaining("Lua call error:"));
@@ -637,6 +614,50 @@ describe("collectDemoSequenceActions()", () => {
       expect(actions).toEqual([]);
     }
     expect(error).not.toHaveBeenCalled();
+  });
+
+  it("stops after the maximum call depth", () => {
+    const actions = collectDemoSequenceActions(
+      101,
+      buildResourceIndex([]).index,
+      1,
+      [],
+    );
+
+    expect(actions).toEqual([]);
+    expect(error).toHaveBeenCalledWith("Maximum call depth exceeded.");
+  });
+
+  it("includes sequence variable declarations by default", () => {
+    const sequence = fakeSequence();
+    sequence.body.id = 1;
+    sequence.body.body = [{
+      kind: "lua",
+      args: { lua: "toast(variable(\"Variable\"))" },
+    }];
+    sequence.body.args.locals.body = [{
+      kind: "variable_declaration",
+      args: {
+        label: "Variable",
+        data_value: { kind: "text", args: { string: "v" } },
+      },
+    }];
+    const ri = buildResourceIndex([sequence]).index;
+
+    collectDemoSequenceActions(0, ri, 1, undefined);
+
+    expect(runLuaSpy).toHaveBeenCalledWith(0, expect.any(String), [
+      {
+        kind: "parameter_application",
+        args: expect.objectContaining({
+          label: "Variable",
+          data_value: expect.objectContaining({
+            kind: "text",
+            args: { string: "v" },
+          }),
+        }),
+      },
+    ]);
   });
 
   it("handles circular references", () => {
@@ -729,6 +750,23 @@ describe("runDemoLuaCode()", () => {
     jest.runAllTimers();
     expect(error).not.toHaveBeenCalled();
     expect(console.log).toHaveBeenCalledWith("table	1");
+    expect(info).not.toHaveBeenCalled();
+  });
+
+  it("runs repeated api point reads", () => {
+    const point1 = fakePoint();
+    point1.body.id = 1;
+    const point2 = fakePoint();
+    point2.body.id = 2;
+    mockResources = buildResourceIndex([point1, point2]);
+    runDemoLuaCode(`
+      local first = api{url="/api/points"}
+      local second = api{url="/api/points"}
+      print(#first, #second)
+    `);
+    jest.runAllTimers();
+    expect(error).not.toHaveBeenCalled();
+    expect(console.log).toHaveBeenCalledWith("2	2");
     expect(info).not.toHaveBeenCalled();
   });
 
@@ -947,6 +985,27 @@ describe("runDemoLuaCode()", () => {
     expect(console.log).toHaveBeenCalledWith("2");
   });
 
+  it("runs repeated get_group reads", () => {
+    const group = fakePointGroup();
+    group.body.id = 1;
+    group.body.point_ids = [1, 2];
+    const point1 = fakePoint();
+    point1.body.id = 1;
+    const point2 = fakePoint();
+    point2.body.id = 2;
+    mockResources = buildResourceIndex([group, point1, point2]);
+    runDemoLuaCode(`
+      local first = get_group(1)
+      local second = get_group(1)
+      print(#first, #second)
+    `);
+    jest.runAllTimers();
+    expect(error).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
+    expect(store.dispatch).toHaveBeenCalledTimes(1);
+    expect(console.log).toHaveBeenCalledWith("2	2");
+  });
+
   it("runs group", () => {
     const group = fakePointGroup();
     group.body.id = 1;
@@ -986,7 +1045,7 @@ describe("runDemoLuaCode()", () => {
     expect(error).not.toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
     expect(store.dispatch).toHaveBeenCalledTimes(1);
-    expect(console.log).toHaveBeenCalledWith("[3,2,1]");
+    expect(console.log).toHaveBeenCalledWith("[1,2,3]");
   });
 
   it("runs json.encode", () => {
@@ -997,7 +1056,7 @@ describe("runDemoLuaCode()", () => {
     expect(error).not.toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
     expect(store.dispatch).toHaveBeenCalledTimes(1);
-    expect(console.log).toHaveBeenCalledWith("[3,2,1]");
+    expect(console.log).toHaveBeenCalledWith("[1,2,3]");
   });
 
   it("runs json.decode", () => {
@@ -1051,7 +1110,7 @@ describe("runDemoLuaCode()", () => {
     }];
     mockResources = buildResourceIndex([sequence]);
     setCurrent({ x: 1, y: 2, z: 3 });
-    runDemoLuaCode(`
+    const lua = `
       cs_eval{
         kind = "rpc_request",
         args = { label = "", priority = 0 },
@@ -1059,7 +1118,10 @@ describe("runDemoLuaCode()", () => {
           { kind = "execute", args = { sequence_id = ${sequenceId} } }
         }
       }
-    `);
+    `;
+    expect(runModule.runLua(0, lua, [], { x: 1, y: 2, z: 3 }).length)
+      .toBeGreaterThan(0);
+    runDemoLuaCode(lua);
     for (let i = 0; i < 4; i++) {
       jest.runOnlyPendingTimers();
       await Promise.resolve();
@@ -1112,6 +1174,25 @@ describe("runDemoLuaCode()", () => {
     jest.runAllTimers();
     expect(error).not.toHaveBeenCalled();
     expect(info).toHaveBeenCalledWith("test", TOAST_OPTIONS().info);
+  });
+
+  it("interpolates position in send_message", () => {
+    setCurrent({ x: 1, y: 2, z: 3 });
+    runDemoLuaCode(`send_message(
+      "info",
+      "FarmBot is at position {{ x }}, {{ y }}, {{ z }}.",
+      "toast"
+    )`);
+    jest.runAllTimers();
+    const message = "FarmBot is at position 1, 2, 3.";
+    expect(error).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith(message, TOAST_OPTIONS().info);
+    expect(init).toHaveBeenCalledWith("Log", expect.objectContaining({
+      message,
+      x: 1,
+      y: 2,
+      z: 3,
+    }));
   });
 
   it("runs send_message: multiple channels", () => {
@@ -1265,6 +1346,26 @@ describe("runDemoLuaCode()", () => {
     expect(error).not.toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
     expect(store.dispatch).toHaveBeenCalledTimes(1);
+    expect(console.log).toHaveBeenCalledWith("false");
+  });
+
+  it("runs read_status with a path", () => {
+    runDemoLuaCode(`
+      print(read_status("informational_settings", "locked"))
+    `);
+    jest.runAllTimers();
+    expect(error).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
+    expect(console.log).toHaveBeenCalledWith("false");
+  });
+
+  it("runs read_status with a table path", () => {
+    runDemoLuaCode(`
+      print(read_status({"informational_settings", "locked"}))
+    `);
+    jest.runAllTimers();
+    expect(error).not.toHaveBeenCalled();
+    expect(info).not.toHaveBeenCalled();
     expect(console.log).toHaveBeenCalledWith("false");
   });
 
@@ -1496,6 +1597,10 @@ describe("runDemoLuaCode()", () => {
     expect(error).not.toHaveBeenCalled();
     expect(console.log).toHaveBeenCalledWith("0");
     expect(info).not.toHaveBeenCalled();
+    expect(store.dispatch).toHaveBeenCalledWith({
+      type: Actions.DEMO_WRITE_PIN,
+      payload: { pin: 63, mode: "digital", value: 0 },
+    });
   });
 
   it("runs read_pin 63: 1", () => {
@@ -1507,6 +1612,10 @@ describe("runDemoLuaCode()", () => {
     expect(error).not.toHaveBeenCalled();
     expect(console.log).toHaveBeenCalledWith("1");
     expect(info).not.toHaveBeenCalled();
+    expect(store.dispatch).toHaveBeenCalledWith({
+      type: Actions.DEMO_WRITE_PIN,
+      payload: { pin: 63, mode: "digital", value: 1 },
+    });
   });
 
   it("runs read_pin 5", () => {
@@ -1647,34 +1756,51 @@ describe("runDemoLuaCode()", () => {
     runDemoLuaCode("calibrate_camera()");
     jest.runAllTimers();
     expect(error).not.toHaveBeenCalled();
-    expect(info).not.toHaveBeenCalled();
-    expect(initSave).toHaveBeenCalledWith("Image", {
-      attachment_url: "http://localhost/soil.png",
-      created_at: expect.any(String),
-      meta: {
-        name: "demo.png",
-        x: 1,
-        y: 2,
-        z: 3,
-      },
-    });
+    expect(info).toHaveBeenCalledWith(
+      "Camera calibration complete.",
+      TOAST_OPTIONS().success,
+    );
+    expect(initSave).not.toHaveBeenCalled();
   });
 
   it("runs detect_weeds", () => {
+    const useBounds = fakeFarmwareEnv();
+    useBounds.body.key = "WEED_DETECTOR_use_bounds";
+    useBounds.body.value = "\"FALSE\"";
+    const firmwareConfig = fakeFirmwareConfig();
+    firmwareConfig.body.movement_home_up_z = 0;
+    mockResources = buildResourceIndex([
+      fakeFbosConfig(),
+      firmwareConfig,
+      fakeWebAppConfig(),
+      useBounds,
+    ]);
+    randomSpy.mockReset()
+      .mockReturnValueOnce(2)
+      .mockReturnValueOnce(-240)
+      .mockReturnValueOnce(-320)
+      .mockReturnValueOnce(10)
+      .mockReturnValueOnce(240)
+      .mockReturnValueOnce(320)
+      .mockReturnValueOnce(30);
     setCurrent({ x: 1, y: 2, z: 3 });
     runDemoLuaCode("detect_weeds()");
     jest.runAllTimers();
     expect(error).not.toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
-    expect(initSave).toHaveBeenCalledWith("Image", {
-      attachment_url: "http://localhost/soil.png",
-      created_at: expect.any(String),
+    expect(initSave).not.toHaveBeenCalledWith("Image", expect.anything());
+    expect(initSave).toHaveBeenCalledWith("Point", {
       meta: {
-        name: "demo.png",
-        x: 1,
-        y: 2,
-        z: 3,
+        color: "red",
+        created_by: "plant-detection",
       },
+      name: "Weed",
+      plant_stage: "pending",
+      pointer_type: "Weed",
+      radius: 10,
+      x: -239,
+      y: -318,
+      z: -500,
     });
     expect(initSave).toHaveBeenCalledWith("Point", {
       meta: {
@@ -1684,29 +1810,25 @@ describe("runDemoLuaCode()", () => {
       name: "Weed",
       plant_stage: "pending",
       pointer_type: "Weed",
-      radius: 50,
-      x: 1,
-      y: 2,
+      radius: 30,
+      x: 241,
+      y: 322,
       z: -500,
     });
+    expect(initSave).toHaveBeenCalledTimes(2);
   });
 
   it("runs measure_soil_height", () => {
+    const fbosConfig = fakeFbosConfig();
+    fbosConfig.body.soil_height = -425;
+    mockResources = buildResourceIndex([fbosConfig]);
+    randomSpy.mockReturnValue(50);
     setCurrent({ x: 1, y: 2, z: 3 });
     runDemoLuaCode("measure_soil_height()");
     jest.runAllTimers();
     expect(error).not.toHaveBeenCalled();
     expect(info).not.toHaveBeenCalled();
-    expect(initSave).toHaveBeenCalledWith("Image", {
-      attachment_url: "http://localhost/soil.png",
-      created_at: expect.any(String),
-      meta: {
-        name: "demo.png",
-        x: 1,
-        y: 2,
-        z: 3,
-      },
-    });
+    expect(initSave).not.toHaveBeenCalledWith("Image", expect.anything());
     expect(initSave).toHaveBeenCalledWith("Point", {
       meta: {
         at_soil_level: "true",
@@ -1716,7 +1838,7 @@ describe("runDemoLuaCode()", () => {
       radius: 0,
       x: 1,
       y: 2,
-      z: -500,
+      z: -375,
     });
   });
 

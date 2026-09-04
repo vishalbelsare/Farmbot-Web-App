@@ -9,17 +9,26 @@ import {
   PlantSpreadInstancesProps,
   ThreeDPlantLabel,
   ThreeDPlantLabelProps,
+  findPlantById,
   outOfBoundsShaderModification,
 } from "../plants";
 import { Path } from "../../../internal_urls";
-import { Actions } from "../../../constants";
 import { convertPlants } from "../../../farm_designer/three_d_garden_map";
 import { setMockInstanceId } from "../../../__test_support__/three_d_mocks";
 import { useFrame } from "@react-three/fiber";
-import { Quaternion, WebGLProgramParametersWithUniforms } from "three";
+import * as reactSpring from "@react-spring/three";
+import {
+  DoubleSide,
+  Quaternion,
+  WebGLProgramParametersWithUniforms,
+} from "three";
 import { Mode } from "../../../farm_designer/map/interfaces";
 import * as mapUtil from "../../../farm_designer/map/util";
 import * as meshKey from "../instanced_mesh_key";
+import {
+  createRenderer,
+  unmountRenderer,
+} from "../../../__test_support__/test_renderer";
 
 interface MockRef {
   current: {
@@ -31,12 +40,13 @@ interface MockRef {
     material?: { needsUpdate: boolean } | { needsUpdate: boolean }[];
   } | undefined;
 }
-let mockRefImpl = (): MockRef => ({ current: undefined });
 let refQueue: MockRef[] = [];
 let allRefs: MockRef[] = [];
 let allowImperativeHandle = true;
 let reactUseRefSpy: jest.SpyInstance;
 let reactUseImperativeHandleSpy: jest.SpyInstance;
+const actualUseRef = jest.requireActual("react")
+  .useRef as typeof React.useRef;
 
 let getModeSpy: jest.SpyInstance;
 
@@ -56,20 +66,24 @@ const getMeshRef = () =>
   allRefs.find(ref => !!ref.current?.setMatrixAt);
 
 const queueMeshRef = (override?: Partial<MockRef["current"]>) => {
-  refQueue = Array.from({ length: 10 }, () => ({
+  refQueue = [{
     current: {
       ...buildMeshRef(),
       ...override,
     },
-  }));
+  }];
 };
 
 describe("<ThreeDPlantLabel />", () => {
   beforeEach(() => {
     reactUseRefSpy = jest.spyOn(React, "useRef")
-      .mockImplementation(() => {
-        const nextRef = refQueue.shift() || mockRefImpl();
-        allRefs.push(nextRef);
+      .mockImplementation((initialValue?: unknown) => {
+        const nextRef = actualUseRef(initialValue);
+        const queuedRef = refQueue.shift();
+        if (queuedRef) {
+          (nextRef as MockRef).current = queuedRef.current;
+        }
+        allRefs.push(nextRef as MockRef);
         return nextRef;
       });
     const actualUseImperativeHandle = jest.requireActual("react")
@@ -82,7 +96,6 @@ describe("<ThreeDPlantLabel />", () => {
     location.pathname = Path.mock(Path.designer());
     refQueue = [{ current: undefined }];
     allRefs = [];
-    mockRefImpl = () => ({ current: undefined });
   });
 
   afterEach(() => {
@@ -123,6 +136,39 @@ describe("<ThreeDPlantLabel />", () => {
     expect(screen.getByText("Beet")).toBeInTheDocument();
   });
 
+  it("skips all-label rerenders during unrelated config churn", () => {
+    const p = fakeProps();
+    p.config.labels = true;
+    p.config.labelsOnHover = false;
+    p.getZ = jest.fn(() => 0);
+    const { rerender } = render(<ThreeDPlantLabel {...p} />);
+    expect(p.getZ).toHaveBeenCalledTimes(1);
+    (p.getZ as jest.Mock).mockClear();
+
+    rerender(<ThreeDPlantLabel {...p} config={{
+      ...p.config,
+      heading: p.config.heading + 10,
+      label: "unrelated config churn",
+      sunAzimuth: p.config.sunAzimuth + 10,
+    }} />);
+
+    expect(p.getZ).not.toHaveBeenCalled();
+  });
+
+  it("updates labels when rendered plant text changes", () => {
+    const p = fakeProps();
+    p.config.labels = true;
+    p.config.labelsOnHover = false;
+    const { rerender } = render(<ThreeDPlantLabel {...p} />);
+
+    rerender(<ThreeDPlantLabel {...p} plant={{
+      ...p.plant,
+      label: "Chard",
+    }} />);
+
+    expect(screen.getByText("Chard")).toBeInTheDocument();
+  });
+
   it("keeps plant coordinates in garden space", () => {
     const p = fakeProps();
     expect(p.plant.x).toEqual(100);
@@ -133,9 +179,13 @@ describe("<ThreeDPlantLabel />", () => {
 describe("<ThreeDPlantSpread />", () => {
   beforeEach(() => {
     reactUseRefSpy = jest.spyOn(React, "useRef")
-      .mockImplementation(() => {
-        const nextRef = refQueue.shift() || mockRefImpl();
-        allRefs.push(nextRef);
+      .mockImplementation((initialValue?: unknown) => {
+        const nextRef = actualUseRef(initialValue);
+        const queuedRef = refQueue.shift();
+        if (queuedRef) {
+          (nextRef as MockRef).current = queuedRef.current;
+        }
+        allRefs.push(nextRef as MockRef);
         return nextRef;
       });
     const actualUseImperativeHandle = jest.requireActual("react")
@@ -153,7 +203,6 @@ describe("<ThreeDPlantSpread />", () => {
     refQueue = [];
     allRefs = [];
     getModeSpy = jest.spyOn(mapUtil, "getMode").mockReturnValue(Mode.none);
-    mockRefImpl = () => ({ current: undefined });
   });
 
   afterEach(() => {
@@ -187,13 +236,57 @@ describe("<ThreeDPlantSpread />", () => {
     queueMeshRef();
     const p = fakeProps();
     p.spreadVisible = true;
-    const { container } = render(<PlantSpreadInstances {...p} />);
-    expect(container.querySelectorAll("instancedmesh").length).toBe(1);
+    const wrapper = createRenderer(<PlantSpreadInstances {...p} />);
+    const mesh = wrapper.root.findAll(node =>
+      (node.type as string) == "instancedMesh")[0];
+    const material = wrapper.root.findAll(node =>
+      node.props.color == "white")[0];
+
+    expect(mesh).toBeDefined();
+    expect(material.props.side).toEqual(DoubleSide);
+    unmountRenderer(wrapper);
+  });
+
+  it("forces preview spread spheres to remain white", () => {
+    location.pathname = Path.mock(Path.cropSearch("mint"));
+    const p = fakeProps();
+    p.spreadVisible = true;
+    p.forceWhite = true;
+    const wrapper = createRenderer(<PlantSpreadInstances {...p} />);
+    allRefs[0].current = buildMeshRef();
+    const frameFn = (useFrame as jest.Mock).mock.calls[0][0];
+    frameFn({ camera: { quaternion: new Quaternion() } });
+    const mesh = allRefs[0].current;
+    const colors = (mesh?.setColorAt as jest.Mock).mock.calls
+      .map(call => call[1]);
+    const material = wrapper.root.find(node =>
+      typeof node.props.onBeforeCompile == "function");
+    const shader = {
+      vertexShader: [
+        "#include <common>",
+        "#include <color_vertex>",
+        "#include <worldpos_vertex>",
+      ].join("\n"),
+      fragmentShader: [
+        "#include <common>",
+        "#include <color_fragment>",
+      ].join("\n"),
+      uniforms: {},
+    } as unknown as WebGLProgramParametersWithUniforms;
+
+    material.props.onBeforeCompile(shader);
+
+    expect(colors).toHaveLength(2);
+    colors.forEach(color =>
+      expect(color.getHexString()).toEqual("ffffff"));
+    expect(shader.uniforms.uOutside.value.getHexString()).toEqual("ffffff");
+    unmountRenderer(wrapper);
   });
 
   it("uses reserved spread capacity while rendering active plants", () => {
     location.pathname = Path.mock(Path.cropSearch("mint"));
     queueMeshRef();
+    getModeSpy.mockReturnValue(Mode.clickToAdd);
     const p = fakeProps();
     p.instanceCapacity = 10;
     const { container } = render(<PlantSpreadInstances {...p} />);
@@ -219,6 +312,12 @@ describe("<ThreeDPlantSpread />", () => {
     expect(container.querySelectorAll("instancedmesh").length).toBe(1);
   });
 
+  it("finds the active plant directly", () => {
+    const plants = fakeProps().plants;
+    expect(findPlantById(plants, 2)?.icon).toEqual(plants[1].icon);
+    expect(findPlantById(plants, 999999)).toBeUndefined();
+  });
+
   it("renders spread: edit plant mode without plant", () => {
     location.pathname = Path.mock(Path.plants("999999"));
     queueMeshRef();
@@ -228,19 +327,36 @@ describe("<ThreeDPlantSpread />", () => {
     expect(container.querySelectorAll("instancedmesh").length).toBe(1);
   });
 
-  it("handles click on spread part", () => {
-    setMockInstanceId(0);
+  it("keeps spread spheres inert", () => {
     queueMeshRef();
     const p = fakeProps();
+    p.spreadVisible = true;
+    p.dispatch = mockDispatch(jest.fn());
+    p.onSelectObject = jest.fn();
+    p.onHoverObject = jest.fn();
+    const wrapper = createRenderer(<PlantSpreadInstances {...p} />);
+    const mesh = wrapper.root.findAll(node =>
+      (node.type as string) == "instancedMesh")[0];
+    expect(mesh.props.raycast()).toBeUndefined();
+    expect(p.onSelectObject).not.toHaveBeenCalled();
+    expect(p.onHoverObject).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
+    unmountRenderer(wrapper);
+  });
+
+  it("doesn't navigate after orbiting over a spread sphere", () => {
+    queueMeshRef();
+    const p = fakeProps();
+    p.spreadVisible = true;
     const dispatch = jest.fn();
     p.dispatch = mockDispatch(dispatch);
-    const { container } = render(<PlantSpreadInstances {...p} />);
-    const mesh = container.querySelector("instancedmesh");
-    mesh && fireEvent.click(mesh, { instanceId: 0 });
-    expect(dispatch).toHaveBeenCalledWith({
-      type: Actions.SET_PANEL_OPEN, payload: true,
-    });
-    expect(mockNavigate).toHaveBeenCalledWith(Path.plants("1"));
+    const wrapper = createRenderer(<PlantSpreadInstances {...p} />);
+    const mesh = wrapper.root.findAll(node =>
+      (node.type as string) == "instancedMesh")[0];
+    expect(mesh.props.raycast()).toBeUndefined();
+    unmountRenderer(wrapper);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 
   it("doesn't navigate on spread click in camera selection mode", () => {
@@ -279,6 +395,52 @@ describe("<ThreeDPlantSpread />", () => {
     expect(mesh?.geometry?.setAttribute).toHaveBeenCalled();
   });
 
+  it("updates spread state during spring changes", () => {
+    const springSpy = jest.spyOn(reactSpring, "useSpring")
+      .mockImplementation((props: Parameters<typeof reactSpring.useSpring>[0]) => {
+        const resolved = typeof props == "function" ? props() : props;
+        const api = {
+          start: jest.fn((update: {
+            onChange?: (result: { value: { scale?: number } }) => void;
+            onRest?: () => void;
+          }) => {
+            update.onChange?.({ value: { scale: 0.5 } });
+            update.onRest?.();
+            return Promise.resolve();
+          }),
+        };
+        return [resolved, api] as unknown as ReturnType<typeof reactSpring.useSpring>;
+      });
+    queueMeshRef();
+    const p = fakeProps();
+    p.spreadVisible = true;
+    render(<PlantSpreadInstances {...p} />);
+    expect(springSpy).toHaveBeenCalled();
+    springSpy.mockRestore();
+  });
+
+  it("clears spread rendering when the spring hides it", () => {
+    const springSpy = jest.spyOn(reactSpring, "useSpring")
+      .mockImplementation((props: Parameters<typeof reactSpring.useSpring>[0]) => {
+        const resolved = typeof props == "function" ? props() : props;
+        const api = {
+          start: jest.fn((update: {
+            onChange?: (result: { value: { scale?: number } }) => void;
+            onRest?: () => void;
+          }) => {
+            update.onChange?.({ value: { scale: 0 } });
+            update.onRest?.();
+            return Promise.resolve();
+          }),
+        };
+        return [resolved, api] as unknown as ReturnType<typeof reactSpring.useSpring>;
+      });
+    queueMeshRef();
+    render(<PlantSpreadInstances {...fakeProps()} />);
+    expect(springSpy).toHaveBeenCalled();
+    springSpy.mockRestore();
+  });
+
   it("skips frame updates when invisible", () => {
     queueMeshRef();
     const p = fakeProps();
@@ -305,6 +467,129 @@ describe("<ThreeDPlantSpread />", () => {
     setMatrixAt.mockClear();
     frameFn(state);
     expect(setMatrixAt).not.toHaveBeenCalled();
+  });
+
+  it("skips repeated visible spread frame updates", () => {
+    queueMeshRef();
+    const p = fakeProps();
+    p.spreadVisible = true;
+    render(<PlantSpreadInstances {...p} />);
+    const meshRef = allRefs[0];
+    meshRef.current = buildMeshRef();
+    const mesh = meshRef.current;
+    const setMatrixAt = mesh?.setMatrixAt as jest.Mock;
+    const frameFn = (useFrame as jest.Mock).mock.calls[0][0];
+    const state = { camera: { quaternion: new Quaternion() } };
+    frameFn(state);
+    setMatrixAt.mockClear();
+    frameFn(state);
+    expect(setMatrixAt).not.toHaveBeenCalled();
+  });
+
+  it("updates click-to-add spread when active position changes", () => {
+    queueMeshRef();
+    const p = fakeProps();
+    p.spreadVisible = true;
+    getModeSpy.mockReturnValue(Mode.clickToAdd);
+    render(<PlantSpreadInstances {...p} />);
+    const meshRef = allRefs[0];
+    meshRef.current = buildMeshRef();
+    const mesh = meshRef.current;
+    const setMatrixAt = mesh?.setMatrixAt as jest.Mock;
+    const frameFn = (useFrame as jest.Mock).mock.calls[0][0];
+    const state = { camera: { quaternion: new Quaternion() } };
+    frameFn(state);
+    setMatrixAt.mockClear();
+    p.activePositionRef.current = { x: 100, y: 100 };
+    frameFn(state);
+    expect(setMatrixAt).toHaveBeenCalled();
+  });
+
+  it("reuses spread placement during click-to-add updates", () => {
+    queueMeshRef();
+    const p = fakeProps();
+    p.getZ = jest.fn(() => 0);
+    p.spreadVisible = true;
+    getModeSpy.mockReturnValue(Mode.clickToAdd);
+    render(<PlantSpreadInstances {...p} />);
+    const getZ = p.getZ as jest.Mock;
+    expect(getZ).toHaveBeenCalledTimes(p.plants.length);
+    getZ.mockClear();
+    const meshRef = allRefs[0];
+    meshRef.current = buildMeshRef();
+    const mesh = meshRef.current;
+    const setMatrixAt = mesh?.setMatrixAt as jest.Mock;
+    const frameFn = (useFrame as jest.Mock).mock.calls[0][0];
+    const state = { camera: { quaternion: new Quaternion() } };
+    p.activePositionRef.current = { x: 100, y: 100 };
+    frameFn(state);
+    expect(setMatrixAt).toHaveBeenCalled();
+    expect(getZ).not.toHaveBeenCalled();
+  });
+
+  it("memoizes spread placement across unrelated config churn", () => {
+    queueMeshRef();
+    const p = fakeProps();
+    p.getZ = jest.fn(() => 0);
+    p.spreadVisible = true;
+    const { rerender } = render(<PlantSpreadInstances {...p} />);
+    expect(p.getZ).toHaveBeenCalledTimes(p.plants.length);
+    (p.getZ as jest.Mock).mockClear();
+
+    rerender(<PlantSpreadInstances {...p} config={{
+      ...p.config,
+      heading: p.config.heading + 10,
+      label: "unrelated config churn",
+      sunAzimuth: p.config.sunAzimuth + 10,
+    }} />);
+
+    expect(p.getZ).not.toHaveBeenCalled();
+  });
+
+  it("updates spread placement when position config changes", () => {
+    queueMeshRef();
+    const p = fakeProps();
+    p.getZ = jest.fn(() => 0);
+    p.spreadVisible = true;
+    const { rerender } = render(<PlantSpreadInstances {...p} />);
+    expect(p.getZ).toHaveBeenCalledTimes(p.plants.length);
+    (p.getZ as jest.Mock).mockClear();
+
+    rerender(<PlantSpreadInstances {...p} config={{
+      ...p.config,
+      mirrorX: !p.config.mirrorX,
+    }} />);
+
+    expect(p.getZ).toHaveBeenCalledTimes(p.plants.length);
+  });
+
+  it("updates click-to-add spread after unrelated config churn", () => {
+    queueMeshRef();
+    const p = fakeProps();
+    p.getZ = jest.fn(() => 0);
+    p.spreadVisible = true;
+    getModeSpy.mockReturnValue(Mode.clickToAdd);
+    const { rerender } = render(<PlantSpreadInstances {...p} />);
+    (p.getZ as jest.Mock).mockClear();
+
+    rerender(<PlantSpreadInstances {...p} config={{
+      ...p.config,
+      label: "unrelated config churn",
+    }} />);
+
+    expect(p.getZ).not.toHaveBeenCalled();
+    const frameCalls = (useFrame as jest.Mock).mock.calls;
+    const frameFn = frameCalls[frameCalls.length - 1][0];
+    const meshRefs = allRefs.filter(ref => !!ref.current?.setMatrixAt);
+    const mesh = meshRefs[meshRefs.length - 1].current;
+    const setMatrixAt = mesh?.setMatrixAt as jest.Mock;
+    const setColorAt = mesh?.setColorAt as jest.Mock;
+    setMatrixAt.mockClear();
+    setColorAt.mockClear();
+    p.activePositionRef.current = { x: 100, y: 100 };
+    frameFn({ camera: { quaternion: new Quaternion() } });
+    expect(setMatrixAt).toHaveBeenCalled();
+    expect(setColorAt).toHaveBeenCalled();
   });
 
   it("handles missing mesh in layout effect", () => {
@@ -399,5 +684,7 @@ describe("outOfBoundsShaderModification", () => {
     expect(shader.fragmentShader).toContain("p.x *= uMirrorX");
     expect(shader.fragmentShader).toContain("p.y *= uMirrorY");
     expect(shader.vertexShader).not.toContain("vInstanceColor");
+    expect(shader.vertexShader).toContain("boundsWorldPosition");
+    expect(shader.vertexShader).not.toContain("worldPosition.xyz");
   });
 });

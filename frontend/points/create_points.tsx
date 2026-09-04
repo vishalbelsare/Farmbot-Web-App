@@ -1,13 +1,11 @@
 import React from "react";
 import { connect } from "react-redux";
 import { Everything, ResourceColor } from "../interfaces";
-import { initSave } from "../api/crud";
 import { Row, BlurableInput, ColorPicker } from "../ui";
-import { DrawnPointPayl } from "../farm_designer/interfaces";
-import { Actions, Content } from "../constants";
 import {
-  GenericPointer, WeedPointer,
-} from "farmbot/dist/resources/api_resources";
+  DrawnPointPayl, GridPlantingRequest,
+} from "../farm_designer/interfaces";
+import { Actions, Content } from "../constants";
 import {
   DesignerPanel,
   DesignerPanelHeader,
@@ -18,7 +16,6 @@ import { validBotLocationData } from "../util/location";
 import { t } from "../i18next_wrapper";
 import { Panel } from "../farm_designer/panel_header";
 import { ListItem } from "../plants/plant_panel";
-import { success } from "../toast/toast";
 import { PlantGrid } from "../plants/grid/plant_grid";
 import { getWebAppConfigValue } from "../config_storage/actions";
 import { BooleanSetting } from "../session_keys";
@@ -27,59 +24,36 @@ import {
 } from "../tools/tool_slot_edit_components";
 import { BotPosition } from "../devices/interfaces";
 import { clone, isUndefined } from "lodash";
+import { uuid } from "farmbot";
 import { Path } from "../internal_urls";
 import { NavigationContext } from "../routes_helpers";
 import { NavigateFunction } from "react-router";
 import { Mode } from "../farm_designer/map/interfaces";
 import { getMode } from "../farm_designer/map/util";
+import { createPoint, CreatePointProps } from "./create_point_action";
+import {
+  DEFAULT_POINT_GRID_RADIUS,
+  DEFAULT_POINT_GRID_SPACING,
+} from "../plants/grid/grid_math";
+
+export { createPoint };
+export type { CreatePointProps };
 
 export function mapStateToProps(props: Everything): CreatePointsProps {
   const { drawnPoint } = props.resources.consumers.farm_designer;
+  const getConfigValue = getWebAppConfigValue(() => props);
   return {
     dispatch: props.dispatch,
     drawnPoint: drawnPoint,
-    xySwap: !!getWebAppConfigValue(() => props)(BooleanSetting.xy_swap),
+    gridPlanting:
+      props.resources.consumers.farm_designer.gridPlanting,
+    legacyPointGrid:
+      props.resources.consumers.farm_designer.legacyPointGrid,
+    is3D: !!getConfigValue(BooleanSetting.three_d_garden),
+    xySwap: !!getConfigValue(BooleanSetting.xy_swap),
     botPosition: validBotLocationData(props.bot.hardware.location_data).position,
   };
 }
-
-export interface CreatePointProps {
-  navigate: NavigateFunction;
-  dispatch: Function;
-  drawnPoint: DrawnPointPayl;
-}
-
-export const createPoint = (props: CreatePointProps) => {
-  const { dispatch, drawnPoint, navigate } = props;
-  const panel = getMode() == Mode.createWeed ? "weeds" : "points";
-  const body: GenericPointer | WeedPointer = {
-    pointer_type: panel == "weeds" ? "Weed" : "GenericPointer",
-    name: drawnPoint.name ||
-      (panel == "weeds"
-        ? t("Created Weed")
-        : t("Created Point")),
-    meta: {
-      color: drawnPoint.color,
-      created_by: "farm-designer",
-      type: panel == "weeds" ? "weed" : "point",
-      ...(drawnPoint.at_soil_level ? { at_soil_level: "true" } : {}),
-    },
-    x: drawnPoint.cx || 0,
-    y: drawnPoint.cy || 0,
-    z: drawnPoint.z,
-    plant_stage: "active",
-    radius: drawnPoint.r,
-  };
-  dispatch(initSave("Point", body));
-  success(panel == "weeds"
-    ? t("Weed created.")
-    : t("Point created."));
-  dispatch({
-    type: Actions.SET_DRAWN_POINT_DATA,
-    payload: undefined,
-  });
-  navigate(Path.designer(panel));
-};
 
 export const resetDrawnPointDataAction = () => {
   const payload: DrawnPointPayl = {
@@ -100,9 +74,17 @@ export const resetDrawnPointDataAction = () => {
 export interface CreatePointsProps {
   dispatch: Function;
   drawnPoint: DrawnPointPayl | undefined;
+  gridPlanting?: GridPlantingRequest;
+  legacyPointGrid?: boolean;
+  is3D?: boolean;
   xySwap: boolean;
   botPosition: BotPosition;
 }
+
+type EditablePointKey = Exclude<
+  keyof DrawnPointPayl,
+  "placementPhase"
+>;
 
 export class RawCreatePoints extends React.Component<CreatePointsProps> {
   constructor(props: CreatePointsProps) {
@@ -113,17 +95,58 @@ export class RawCreatePoints extends React.Component<CreatePointsProps> {
   get panel() { return Path.getSlug(Path.designer()); }
 
   componentDidMount() {
-    this.props.dispatch(resetDrawnPointDataAction());
+    window.addEventListener("keydown", this.toggleGridWithKeyboard);
+    if (isUndefined(this.props.drawnPoint)) {
+      this.props.dispatch(resetDrawnPointDataAction());
+    }
+    this.props.legacyPointGrid && this.consumeLegacyPointGrid();
+  }
+
+  componentDidUpdate(prevProps: CreatePointsProps) {
+    !prevProps.legacyPointGrid
+      && this.props.legacyPointGrid
+      && this.consumeLegacyPointGrid();
   }
 
   componentWillUnmount() {
+    window.removeEventListener("keydown", this.toggleGridWithKeyboard);
     this.props.dispatch({
       type: Actions.SET_DRAWN_POINT_DATA,
       payload: undefined,
     });
+    this.pointGridRequest && this.props.dispatch({
+      type: Actions.CLEAR_GRID_PLANTING,
+      payload: this.pointGridRequest.token,
+    });
   }
 
-  updateAttr = (key: keyof DrawnPointPayl, value: string | boolean) => {
+  consumeLegacyPointGrid = () => this.props.dispatch({
+    type: Actions.SET_LEGACY_POINT_GRID,
+    payload: false,
+  });
+
+  setDrawnPoint = (drawnPoint: DrawnPointPayl) => {
+    this.props.dispatch({
+      type: Actions.SET_DRAWN_POINT_DATA,
+      payload: drawnPoint,
+    });
+    const request = this.pointGridRequest;
+    request && this.props.dispatch({
+      type: Actions.SET_GRID_PLANTING,
+      payload: {
+        ...request,
+        itemName: drawnPoint.name,
+        z: drawnPoint.z,
+        meta: {
+          ...request.meta,
+          color: drawnPoint.color,
+          at_soil_level: "" + drawnPoint.at_soil_level,
+        },
+      },
+    });
+  };
+
+  updateAttr = (key: EditablePointKey, value: string | boolean) => {
     const { drawnPoint: rawDrawnPoint } = this.props;
     const drawnPoint = clone(rawDrawnPoint);
     if (drawnPoint) {
@@ -139,14 +162,11 @@ export class RawCreatePoints extends React.Component<CreatePointsProps> {
           const intValue = parseIntInput("" + value);
           drawnPoint[key] = intValue;
       }
-      this.props.dispatch({
-        type: Actions.SET_DRAWN_POINT_DATA,
-        payload: drawnPoint,
-      });
+      this.setDrawnPoint(drawnPoint);
     }
   };
 
-  updateValue = (key: keyof DrawnPointPayl) => {
+  updateValue = (key: EditablePointKey) => {
     return (e: React.SyntheticEvent<HTMLInputElement>) => {
       const { value } = e.currentTarget;
       this.updateAttr(key, value);
@@ -158,6 +178,61 @@ export class RawCreatePoints extends React.Component<CreatePointsProps> {
   navigate: NavigateFunction = url => { this.context?.(url as string); };
 
   closePanel = () => { this.navigate(Path.designer(this.panel)); };
+
+  get pointGridRequest() {
+    return this.props.gridPlanting?.gridType == "point"
+      ? this.props.gridPlanting
+      : undefined;
+  }
+
+  toggleThreeDGrid = () => {
+    if (this.pointGridRequest) {
+      this.props.dispatch({
+        type: Actions.SET_GRID_PLANTING,
+        payload: undefined,
+      });
+      return;
+    }
+    const drawnPoint = this.props.drawnPoint;
+    if (!drawnPoint) { return; }
+    const token = uuid();
+    this.props.dispatch({
+      type: Actions.SET_GRID_PLANTING,
+      payload: {
+        token,
+        gridId: token,
+        gridType: "point",
+        itemName: drawnPoint.name,
+        defaultSpacing: DEFAULT_POINT_GRID_SPACING,
+        radius: DEFAULT_POINT_GRID_RADIUS,
+        z: drawnPoint.z,
+        meta: {
+          color: drawnPoint.color,
+          at_soil_level: "" + drawnPoint.at_soil_level,
+        },
+      },
+    });
+  };
+
+  toggleGridWithKeyboard = (event: KeyboardEvent) => {
+    const target = event.target;
+    const enteringText = target instanceof HTMLElement
+      && (target.matches("input, textarea, select")
+        || target.isContentEditable);
+    if (!this.props.is3D
+      || this.panel != "points"
+      || event.repeat
+      || event.defaultPrevented
+      || event.ctrlKey
+      || event.metaKey
+      || event.altKey
+      || enteringText
+      || event.key?.toLowerCase() != "g") {
+      return;
+    }
+    event.preventDefault();
+    this.toggleThreeDGrid();
+  };
 
   PointProperties = ({ drawnPoint }: { drawnPoint: DrawnPointPayl }) =>
     <ul className="grid">
@@ -193,7 +268,7 @@ export class RawCreatePoints extends React.Component<CreatePointsProps> {
               name="cx"
               type="number"
               onCommit={this.updateValue("cx")}
-              value={drawnPoint.cx || ""} />
+              value={drawnPoint.cx ?? ""} />
           </div>
           <div>
             <label>{t("Y")}</label>
@@ -201,7 +276,7 @@ export class RawCreatePoints extends React.Component<CreatePointsProps> {
               name="cy"
               type="number"
               onCommit={this.updateValue("cy")}
-              value={drawnPoint.cy || ""} />
+              value={drawnPoint.cy ?? ""} />
           </div>
           <div>
             <label>{t("Z")}</label>
@@ -209,7 +284,7 @@ export class RawCreatePoints extends React.Component<CreatePointsProps> {
               name="z"
               type="number"
               onCommit={this.updateValue("z")}
-              value={drawnPoint.z || ""} />
+              value={drawnPoint.z ?? ""} />
           </div>
           <UseCurrentLocation botPosition={this.props.botPosition}
             onChange={() => {
@@ -222,10 +297,7 @@ export class RawCreatePoints extends React.Component<CreatePointsProps> {
                   cy: y,
                   z,
                 };
-                this.props.dispatch({
-                  type: Actions.SET_DRAWN_POINT_DATA,
-                  payload,
-                });
+                this.setDrawnPoint(payload);
               }
             }} />
         </Row>
@@ -246,9 +318,12 @@ export class RawCreatePoints extends React.Component<CreatePointsProps> {
 
   render() {
     const panelType = this.panel == "weeds" ? Panel.Weeds : Panel.Points;
+    const pointDescription = this.props.is3D
+      ? ""
+      : Content.CREATE_POINTS_DESCRIPTION_2D;
     const panelDescription = this.panel == "weeds"
       ? Content.CREATE_WEEDS_DESCRIPTION
-      : Content.CREATE_POINTS_DESCRIPTION;
+      : pointDescription;
     const { drawnPoint } = this.props;
     if (isUndefined(drawnPoint)) { return <></>; }
     return <DesignerPanel panelName={"point-creation"} panel={panelType}>
@@ -258,31 +333,48 @@ export class RawCreatePoints extends React.Component<CreatePointsProps> {
         title={this.panel == "weeds" ? t("Add weed") : t("Add point")}
         backTo={Path.designer(this.panel)}
         description={panelDescription}>
-        <button className="fb-button green save"
-          title={t("save")}
-          onClick={() => createPoint({
-            drawnPoint,
-            navigate: this.navigate,
-            dispatch: this.props.dispatch,
-          })}>
-          {t("Save")}
-        </button>
+        <div className={"point-creation-header-actions"}>
+          {!this.pointGridRequest &&
+            <button className="fb-button green save"
+              title={t("save")}
+              onClick={() => createPoint({
+                drawnPoint,
+                navigate: this.navigate,
+                dispatch: this.props.dispatch,
+              })}>
+              {t("Save")}
+            </button>}
+          {panelType == Panel.Points && this.props.is3D &&
+            <button
+              type={"button"}
+              aria-pressed={!!this.pointGridRequest}
+              className={[
+                "plus-grid-btn",
+                "fb-button",
+                "clear",
+                this.pointGridRequest ? "grid-mode-active" : "",
+              ].join(" ")}
+              onClick={this.toggleThreeDGrid}>
+              + {t("grid")}
+            </button>}
+        </div>
       </DesignerPanelHeader>
       <DesignerPanelContent panelName={"point-creation"}>
         <this.PointProperties drawnPoint={drawnPoint} />
         {panelType == Panel.Points && <hr />}
-        {panelType == Panel.Points &&
+        {panelType == Panel.Points && !this.props.is3D &&
           <PlantGrid
             xy_swap={this.props.xySwap}
             itemName={drawnPoint.name}
             radius={drawnPoint.r}
             dispatch={this.props.dispatch}
             botPosition={this.props.botPosition}
-            z={drawnPoint.z || this.props.botPosition.z}
+            z={drawnPoint.z ?? this.props.botPosition.z}
             meta={{
               color: drawnPoint.color,
               at_soil_level: "" + drawnPoint.at_soil_level,
             }}
+            open={this.props.legacyPointGrid}
             collapsible={true}
             close={this.closePanel} />}
       </DesignerPanelContent>

@@ -1,8 +1,8 @@
 import React from "react";
 import { fireEvent, render } from "@testing-library/react";
 import {
-  DrawnPoint, DrawnPointProps, Point, PointInstances, PointInstancesProps,
-  PointProps,
+  DrawnPoint, drawnPointPropsEqual, DrawnPointProps, Point,
+  PointInstances, PointInstancesProps, PointProps,
 } from "../point";
 import { INITIAL } from "../../config";
 import { clone } from "lodash";
@@ -14,7 +14,9 @@ import {
   fakeDesignerState, fakeDrawnPoint,
 } from "../../../__test_support__/fake_designer_state";
 import { SpecialStatus } from "farmbot";
+import { Mode } from "../../../farm_designer/map/interfaces";
 import {
+  actRenderer,
   createRenderer,
   unmountRenderer,
 } from "../../../__test_support__/test_renderer";
@@ -53,7 +55,7 @@ describe("<Point />", () => {
     p.point.body.x = 100;
     p.point.body.y = 200;
     const { container } = render(<Point {...p} />);
-    expect(container).toContainHTML("position=\"1260,460,400\"");
+    expect(container).toContainHTML("position=\"1250,460,400\"");
   });
 
   it("renders: unsaved", () => {
@@ -78,6 +80,47 @@ describe("<Point />", () => {
     expect(mockNavigate).toHaveBeenCalledWith(Path.points("1"));
   });
 
+  it("selects a point object instead of navigating when handler is present", () => {
+    const p = fakeProps();
+    p.dispatch = mockDispatch(jest.fn());
+    p.onSelectObject = jest.fn();
+    p.point.body.id = 1;
+    const { container } = render(<Point {...p} />);
+    const point = container.querySelector("[name='marker']");
+    point && fireEvent.click(point);
+    expect(p.onSelectObject).toHaveBeenCalledWith({ kind: "point", id: 1 });
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("hovers a point", () => {
+    const p = fakeProps();
+    p.onHoverObject = jest.fn();
+    p.onHoverLabel = jest.fn();
+    p.point.body.id = 1;
+    const { container } = render(<Point {...p} />);
+    const point = container.querySelector("[name='point-1']");
+    point && fireEvent.pointerOver(point);
+    point && fireEvent.pointerOut(point);
+    expect(p.onHoverObject).toHaveBeenCalledWith(true);
+    expect(p.onHoverObject).toHaveBeenCalledWith(false);
+    expect(p.onHoverLabel).toHaveBeenCalledWith({ kind: "point", id: 1 });
+    expect(p.onHoverLabel).toHaveBeenCalledWith(undefined);
+  });
+
+  it("doesn't navigate after orbiting over a point", () => {
+    const p = fakeProps();
+    const dispatch = jest.fn();
+    p.dispatch = mockDispatch(dispatch);
+    p.point.body.id = 1;
+    const wrapper = createRenderer(<Point {...p} />);
+    mountedWrappers.push(wrapper);
+    const point = wrapper.root
+      .findAll(node => node.props.name == "marker")[0];
+    point.props.onClick({ delta: 3 });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
   it("doesn't navigate to point info", () => {
     const p = fakeProps();
     p.dispatch = undefined;
@@ -98,9 +141,136 @@ describe("<Point />", () => {
   it("renders instanced point markers", () => {
     const wrapper = createRenderer(<PointInstances {...fakeInstanceProps()} />);
     mountedWrappers.push(wrapper);
-    const meshes = wrapper.root.findAll(node => node.type == "instancedMesh");
-    expect(meshes.length).toEqual(3);
+    const meshes = wrapper.root.findAll(node =>
+      (node.type as string) == "instancedMesh");
+    expect(meshes.length).toEqual(2);
     expect(meshes[0].props.args[2]).toEqual(2);
+  });
+
+  it("buckets point markers by color", () => {
+    const p = fakeInstanceProps();
+    p.points[0].body.meta.color = "green";
+    p.points[1].body.meta.color = "blue";
+    const wrapper = createRenderer(<PointInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const markers = wrapper.root.findAll(node =>
+      (node.type as string) == "instancedMesh" &&
+      node.props.name == "marker");
+    expect(markers.length).toEqual(2);
+    expect(markers.map(marker => marker.props.args[2])).toEqual([1, 1]);
+    const colors = markers.flatMap(marker =>
+      marker.findAll(node => node.props.color)
+        .map(node => node.props.color));
+    expect([...new Set(colors)].sort()).toEqual([
+      "blue", "green",
+    ]);
+  });
+
+  it("renders mirrored point instance positions", () => {
+    const markerRef = {
+      current: {
+        setMatrixAt: jest.fn(),
+        setColorAt: jest.fn(),
+        instanceMatrix: { needsUpdate: false },
+      },
+    };
+    const ringRef = {
+      current: {
+        setMatrixAt: jest.fn(),
+        setColorAt: jest.fn(),
+        instanceMatrix: { needsUpdate: false },
+      },
+    };
+    const useRefSpy = jest.spyOn(React, "useRef")
+      .mockImplementationOnce(() => markerRef)
+      .mockImplementationOnce(() => ringRef);
+    const p = fakeInstanceProps();
+    p.config.mirrorX = true;
+    p.config.mirrorY = true;
+    p.config.botSizeX = 1000;
+    p.config.botSizeY = 500;
+    p.points = [p.points[0]];
+    p.points[0].body.x = 100;
+    p.points[0].body.y = 200;
+    const wrapper = createRenderer(<PointInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const matrix = markerRef.current.setMatrixAt.mock.calls[0][1];
+    expect(matrix.elements[12]).toBeCloseTo(1250);
+    expect(matrix.elements[13]).toBeCloseTo(460);
+    expect(matrix.elements[14]).toBeCloseTo(400);
+    useRefSpy.mockRestore();
+  });
+
+  it("buckets point radii by color", () => {
+    const p = fakeInstanceProps();
+    p.points[0].body.meta.color = "green";
+    p.points[1].body.meta.color = "blue";
+    const wrapper = createRenderer(<PointInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const rings = wrapper.root.findAll(node =>
+      (node.type as string) == "instancedMesh" &&
+      node.props.name == "marker-radius");
+    expect(rings.length).toEqual(2);
+    expect(rings.map(ring => ring.props.args[2])).toEqual([1, 1]);
+    const colors = rings.flatMap(ring =>
+      ring.findAll(node => node.props.color)
+        .map(node => node.props.color));
+    expect([...new Set(colors)].sort()).toEqual([
+      "blue", "green",
+    ]);
+  });
+
+  it("skips hidden point markers", () => {
+    const p = fakeInstanceProps();
+    p.visible = false;
+    p.getZ = jest.fn();
+    const { container } = render(<PointInstances {...p} />);
+    expect(container.querySelectorAll("instancedmesh").length).toBe(0);
+    expect(p.getZ).not.toHaveBeenCalled();
+  });
+
+  it("skips rebuilds for unrelated config churn", () => {
+    const p = fakeInstanceProps();
+    const dispatch = jest.fn();
+    p.dispatch = mockDispatch(dispatch);
+    p.getZ = jest.fn(() => 0);
+    p.points[0].body.id = 1;
+    const wrapper = createRenderer(<PointInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    expect(p.getZ).toHaveBeenCalledTimes(2);
+    const nextConfig = clone(p.config);
+    nextConfig.sun = p.config.sun + 1;
+    nextConfig.ambient = p.config.ambient + 1;
+    nextConfig.zoomBeaconDebug = !p.config.zoomBeaconDebug;
+    nextConfig.label = "unrelated config churn";
+    (p.getZ as jest.Mock).mockClear();
+    actRenderer(() => wrapper.update(<PointInstances
+      {...p}
+      config={nextConfig} />));
+    expect(p.getZ).not.toHaveBeenCalled();
+    const meshes = wrapper.root.findAll(node =>
+      (node.type as string) == "instancedMesh");
+    expect(meshes.length).toEqual(2);
+    meshes[0].props.onClick({ instanceId: 0 });
+    expect(dispatch).toHaveBeenCalledWith({
+      type: Actions.SET_PANEL_OPEN, payload: true,
+    });
+    expect(mockNavigate).toHaveBeenCalledWith(Path.points("1"));
+  });
+
+  it("updates point instances when position config changes", () => {
+    const p = fakeInstanceProps();
+    p.getZ = jest.fn(() => 0);
+    const wrapper = createRenderer(<PointInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    expect(p.getZ).toHaveBeenCalledTimes(2);
+    const nextConfig = clone(p.config);
+    nextConfig.mirrorX = !p.config.mirrorX;
+    (p.getZ as jest.Mock).mockClear();
+    actRenderer(() => wrapper.update(<PointInstances
+      {...p}
+      config={nextConfig} />));
+    expect(p.getZ).toHaveBeenCalledTimes(2);
   });
 
   it("navigates from a point instance", () => {
@@ -117,6 +287,56 @@ describe("<Point />", () => {
       type: Actions.SET_PANEL_OPEN, payload: true,
     });
     expect(mockNavigate).toHaveBeenCalledWith(Path.points("1"));
+  });
+
+  it("selects a point instance instead of navigating when handler is present", () => {
+    const p = fakeInstanceProps();
+    p.dispatch = mockDispatch(jest.fn());
+    p.onSelectObject = jest.fn();
+    p.points[0].body.id = 1;
+    const wrapper = createRenderer(<PointInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const marker = wrapper.root
+      .findAll(node => node.props.name == "marker")[0];
+    marker.props.onClick({ instanceId: 0 });
+    expect(p.onSelectObject).toHaveBeenCalledWith({ kind: "point", id: 1 });
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("hovers point instances", () => {
+    const p = fakeInstanceProps();
+    p.onHoverObject = jest.fn();
+    p.onHoverLabel = jest.fn();
+    p.points[0].body.id = 1;
+    const wrapper = createRenderer(<PointInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const meshes = wrapper.root.findAll(node => {
+      const name: unknown = node.props.name;
+      return typeof name == "string"
+        && ["marker", "marker-radius"].includes(name);
+    });
+    meshes.forEach(mesh => {
+      mesh.props.onPointerOver({ instanceId: 0 });
+      mesh.props.onPointerOut();
+    });
+    expect(p.onHoverObject).toHaveBeenCalledWith(true);
+    expect(p.onHoverObject).toHaveBeenCalledWith(false);
+    expect(p.onHoverLabel).toHaveBeenCalledWith({ kind: "point", id: 1 });
+    expect(p.onHoverLabel).toHaveBeenCalledWith(undefined);
+  });
+
+  it("doesn't navigate after orbiting over a point instance", () => {
+    const p = fakeInstanceProps();
+    const dispatch = jest.fn();
+    p.dispatch = mockDispatch(dispatch);
+    p.points[0].body.id = 1;
+    const wrapper = createRenderer(<PointInstances {...p} />);
+    mountedWrappers.push(wrapper);
+    const marker = wrapper.root
+      .findAll(node => node.props.name == "marker")[0];
+    marker.props.onClick({ instanceId: 0, delta: 3 });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 });
 
@@ -140,6 +360,17 @@ describe("<DrawnPoint />", () => {
     expect(container).toContainHTML("position=\"0,0,0\"");
   });
 
+  it("draws point radius preview", () => {
+    location.pathname = Path.mock(Path.points("add"));
+    const p = fakeProps();
+    const point = fakeDrawnPoint();
+    point.r = 0;
+    p.designer.drawnPoint = point;
+    p.torusRef = { current: undefined as never };
+    const { container } = render(<DrawnPoint {...p} />);
+    expect(container.querySelector(".torus")).not.toBeNull();
+  });
+
   it("doesn't draw point", () => {
     location.pathname = Path.mock(Path.points("add"));
     const p = fakeProps();
@@ -149,11 +380,39 @@ describe("<DrawnPoint />", () => {
     expect(container).not.toContainHTML("position=\"0,0,0\"");
   });
 
+  it("uses soil height for an ordinary point preview", () => {
+    location.pathname = Path.mock(Path.points("add"));
+    const p = fakeProps();
+    p.usePosition = true;
+    p.designer.drawnPoint = {
+      ...fakeDrawnPoint(),
+      z: 50,
+      at_soil_level: false,
+    };
+    p.getZ = jest.fn(() => -100);
+    render(<DrawnPoint {...p} />);
+    expect(p.getZ).toHaveBeenCalledWith(10, 20);
+  });
+
+  it("uses point z for a soil-height point preview", () => {
+    location.pathname = Path.mock(Path.points("add"));
+    const p = fakeProps();
+    p.usePosition = true;
+    p.designer.drawnPoint = {
+      ...fakeDrawnPoint(),
+      z: 50,
+      at_soil_level: true,
+    };
+    p.getZ = jest.fn(() => -100);
+    render(<DrawnPoint {...p} />);
+    expect(p.getZ).not.toHaveBeenCalled();
+  });
+
   it("draws weed", () => {
     location.pathname = Path.mock(Path.weeds("add"));
     const p = fakeProps();
     const { container } = render(<DrawnPoint {...p} />);
-    expect(container).toContainHTML("generic-weed");
+    expect(container).toContainHTML("weed-icon");
     expect(container).toContainHTML("position=\"0,0,0\"");
     expect(container).toContainHTML("scale=\"30\"");
     expect(container).toContainHTML("color=\"green\"");
@@ -167,10 +426,48 @@ describe("<DrawnPoint />", () => {
     point.r = 0;
     p.designer.drawnPoint = point;
     const { container } = render(<DrawnPoint {...p} />);
-    expect(container).toContainHTML("generic-weed");
+    expect(container).toContainHTML("weed-icon");
     expect(container).toContainHTML("position=\"0,0,0\"");
     expect(container).toContainHTML("scale=\"50\"");
     expect(container).toContainHTML("color=\"green\"");
     expect(container).toContainHTML("opacity=\"0.25\"");
+  });
+
+  it("compares drawn-point-relevant fields", () => {
+    const p = fakeProps();
+    const props = { ...p, mode: Mode.createPoint };
+    expect(drawnPointPropsEqual(props, {
+      ...props,
+      config: { ...props.config, sun: props.config.sun + 1 },
+    })).toBeTruthy();
+    expect(drawnPointPropsEqual(props, {
+      ...props,
+      mode: Mode.createWeed,
+    })).toBeFalsy();
+    expect(drawnPointPropsEqual(props, {
+      ...props,
+      config: { ...props.config, bedXOffset: props.config.bedXOffset + 1 },
+    })).toBeFalsy();
+    const changedDrawnPoint = {
+      ...props.designer.drawnPoint!,
+      r: (props.designer.drawnPoint?.r || 0) + 1,
+    };
+    expect(drawnPointPropsEqual(props, {
+      ...props,
+      designer: {
+        ...props.designer,
+        drawnPoint: changedDrawnPoint,
+      },
+    })).toBeFalsy();
+    expect(drawnPointPropsEqual(props, {
+      ...props,
+      designer: {
+        ...props.designer,
+        drawnPoint: {
+          ...props.designer.drawnPoint!,
+          at_soil_level: !props.designer.drawnPoint?.at_soil_level,
+        },
+      },
+    })).toBeFalsy();
   });
 });

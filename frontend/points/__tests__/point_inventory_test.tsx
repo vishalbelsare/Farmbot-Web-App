@@ -18,6 +18,12 @@ import { Path } from "../../internal_urls";
 import * as pointGroupActions from "../../point_groups/actions";
 import * as deletePointsModule from "../../api/delete_points";
 import { renderWithContext } from "../../__test_support__/mount_with_context";
+import { PointSortMenu } from "../../farm_designer/sort_options";
+import {
+  actRenderer, createRenderer, unmountRenderer,
+} from "../../__test_support__/test_renderer";
+import * as configStorageActions from "../../config_storage/actions";
+import { BooleanSetting } from "../../session_keys";
 
 let createGroupSpy: jest.SpyInstance;
 let deletePointsSpy: jest.SpyInstance;
@@ -51,6 +57,7 @@ describe("<Points />", () => {
     groups: [],
     allPoints: [],
     pointsPanelState: pointsPanelState(),
+    getConfigValue: jest.fn(),
   });
 
   const renderWithRef = (props: PointsProps) => {
@@ -65,15 +72,29 @@ describe("<Points />", () => {
       .find(element => element.textContent
         ?.toLowerCase().includes(sectionName.toLowerCase()));
     expect(section).toBeTruthy();
-    const toggleButton = section?.querySelector("button:not(.delete)")
-      || section?.querySelector("button");
-    expect(toggleButton).toBeTruthy();
-    fireEvent.click(toggleButton as Element);
+    const visibilityToggle = section?.querySelector(".fb-icon-button");
+    expect(visibilityToggle).toBeTruthy();
+    fireEvent.click(visibilityToggle as Element);
   };
 
   it("renders no points", () => {
     const { container } = render(<Points {...fakeProps()} />);
     expect(container.textContent).toContain("No points yet.");
+  });
+
+  it.each([true, false])("toggles point layer from %s", show => {
+    const setConfig = jest.spyOn(configStorageActions, "setWebAppConfigValue")
+      .mockImplementation(jest.fn());
+    const p = fakeProps();
+    p.getConfigValue = jest.fn(() => show);
+    const { container } = render(<Points {...p} />);
+
+    fireEvent.click(container.querySelector(
+      show ? ".fa-eye" : ".fa-eye-slash") as Element);
+
+    expect(setConfig).toHaveBeenCalledWith(
+      BooleanSetting.show_points, !show);
+    setConfig.mockRestore();
   });
 
   it("renders points", () => {
@@ -112,6 +133,16 @@ describe("<Points />", () => {
     if (ref.current) { ref.current.navigate = navigate; }
     ref.current?.navigateById(1)();
     expect(navigate).toHaveBeenCalledWith(Path.groups(1));
+
+    const p = fakeProps();
+    const group = fakePointGroup();
+    group.body.id = 2;
+    group.body.criteria.string_eq = { pointer_type: ["GenericPointer"] };
+    p.groups = [group];
+    p.pointsPanelState.groups = true;
+    const { container } = renderWithContext(<Points {...p} />);
+    fireEvent.click(container.querySelector(".group-search-item") as Element);
+    expect(mockNavigate).toHaveBeenCalledWith(Path.groups(2));
   });
 
   it("adds new group", () => {
@@ -195,6 +226,15 @@ describe("<Points />", () => {
     });
     expect(ref.current?.state.sortBy).toEqual("radius");
     expect(ref.current?.state.reverse).toEqual(true);
+
+    const wrapper = createRenderer(<Points {...fakeProps()} />);
+    const points = wrapper.root.findByType(Points).instance as Points;
+    actRenderer(() => wrapper.root.findByType(PointSortMenu).props.onChange({
+      sortBy: "name",
+      reverse: false,
+    }));
+    expect(points.state.sortBy).toEqual("name");
+    unmountRenderer(wrapper);
   });
 
   it("expands soil height section", () => {
@@ -234,6 +274,7 @@ describe("<Points />", () => {
     fireEvent.click(container.querySelectorAll(".fa-caret-down")[2]);
     expect(ref.current?.state.soilHeightColors).toEqual(["red"]);
     expect(container.innerHTML).toContain("soil-point-graphic");
+    expect(container).toHaveTextContent("use average z: 100");
     fireEvent.click(container.querySelectorAll(".fa-caret-up")[1]);
     expect(ref.current?.state.soilHeightColors).toEqual([]);
   });
@@ -377,5 +418,6 @@ describe("mapStateToProps()", () => {
     state.resources = buildResourceIndex([point, discarded]);
     const props = mapStateToProps(state);
     expect(props.genericPoints).toEqual([point, discarded]);
+    expect(props.getConfigValue(BooleanSetting.show_points)).toBeUndefined();
   });
 });

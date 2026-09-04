@@ -1,4 +1,6 @@
 require "shellwords"
+require_relative "../farmbot_os_assets"
+require_relative "../rollbar_source_maps"
 
 def check_for_digests
   Log
@@ -151,23 +153,28 @@ namespace :api do
   def add_monaco
     src = "node_modules/monaco-editor/min/vs"
     dst = "public/assets/monaco"
-    lua_src = "node_modules/monaco-editor/esm/vs"
-    sh "mkdir -p public/assets/monaco"
-    sh "cp -r #{src}/assets #{dst}"
+
+    sh "mkdir -p #{dst}/assets"
+
     sh "cp -r #{src}/editor #{dst}"
     sh "cp -r #{src}/basic-languages #{dst}"
     sh "cp -r #{src}/loader.js #{dst}"
-    sh "cp -r #{src}/workers-*.js #{dst}"
-    sh "cp -r #{src}/monaco.contribution-*.js #{dst}"
-    sh "cp -r #{src}/editor.api-*.js #{dst}"
     sh "cp -r #{src}/nls.messages-loader.js #{dst}"
+    sh "cp -r #{src}/editor-*.js #{dst}"
+    sh "cp -r #{src}/editorWorkerHost-*.js #{dst}"
+    sh "cp -r #{src}/index-*.js #{dst}"
+    sh "cp -r #{src}/toggleHighContrast-*.js #{dst}"
+    sh "cp -r #{src}/*.worker-*.js #{dst}"
+    sh "cp -r #{src}/monaco.contribution-*.js #{dst}"
     sh "cp -r #{src}/lua-*.js #{dst}"
-    sh "cp -r #{lua_src}/basic-languages/lua #{dst}/basic-languages"
+    sh "cp -r #{src}/assets/editor.worker-*.js #{dst}/assets"
+    sh "cp -r #{src}/assets/editorWebWorkerMain-*.js #{dst}/assets"
   end
 
   desc "Serve javascript assets (via Bun bundler)."
   task serve_assets: :environment do
     clean_assets
+    FarmBotOsAssets.download(fallback: true)
     add_monaco
     patch_three_stdlib
     run_bun_assets "scripts/bun/dev_server.ts"
@@ -176,9 +183,15 @@ namespace :api do
   desc "Don't call this directly. Use `rake assets:precompile`."
   task assets_compile: :environment do
     clean_assets
+    FarmBotOsAssets.download
     add_monaco
     patch_three_stdlib
     run_bun_assets "scripts/bun/build.ts"
+    begin
+      RollbarSourceMaps.upload
+    rescue StandardError => error
+      warn error.message
+    end
   end
 
   desc "Don't call this directly. Use `rake assets:clean`."

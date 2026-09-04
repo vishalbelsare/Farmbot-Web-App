@@ -3,11 +3,12 @@ import { NavLinksProps } from "./interfaces";
 import { Link } from "../link";
 import {
   Panel, showSensors, showFarmware, PANEL_SLUG, TAB_ICON, PANEL_TITLE,
-  getPanelPath, getCurrentPanel,
+  clearGridPlanting, getPanelPath, getCurrentPanel,
   setPanelOpen,
 } from "../farm_designer/panel_header";
 import { ExternalUrl } from "../external_urls";
 import { maybeBeacon } from "../help/tours";
+import { Path } from "../internal_urls";
 
 export const getLinks = (): Panel[] => [
   Panel.Plants,
@@ -15,6 +16,7 @@ export const getLinks = (): Panel[] => [
   Panel.Points,
   Panel.Curves,
   Panel.Sequences,
+  Panel.SceneObjects,
   Panel.Regimens,
   Panel.FarmEvents,
   ...(showSensors() ? [Panel.Sensors] : []),
@@ -29,22 +31,23 @@ export const getLinks = (): Panel[] => [
 export const NavLinks = (props: NavLinksProps) =>
   <div className={"links"}>
     <div className={"nav-links"}>
-      <a id={"map"}
+      <Link id={"map"}
+        to={Path.designer()}
         draggable={false}
         className={getCurrentPanel(props.designer) === Panel.Map
           ? "active"
           : ""}
-        onClick={(e: React.MouseEvent<HTMLAnchorElement>) => {
-          e.preventDefault();
+        onClick={() => {
+          clearGridPlanting(props.dispatch, props.designer);
           props.close();
           props.dispatch(setPanelOpen(false));
         }}>
         <NavIconAndText panel={Panel.Map} alertCount={props.alertCount} />
-      </a>
+      </Link>
       {getLinks().map(panel => {
         const isActive = getCurrentPanel(props.designer) === panel;
         return <Link
-          to={getPanelPath(panel)}
+          to={isActive ? Path.designer() : getPanelPath(panel)}
           className={[
             isActive ? "active" : "",
             maybeBeacon(PANEL_SLUG[panel], "soft", props.helpState),
@@ -52,6 +55,7 @@ export const NavLinks = (props: NavLinksProps) =>
           key={PANEL_SLUG[panel]}
           draggable={false}
           onClick={() => {
+            clearGridPlanting(props.dispatch, props.designer);
             props.dispatch(setPanelOpen(!isActive));
             props.close();
           }}>

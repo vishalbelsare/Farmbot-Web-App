@@ -73,10 +73,13 @@
   align-items: start;
 }
 
-.change-ownership-grid {
-  grid-auto-flow: unset;
-  grid-template-columns: auto 1fr;
-  row-gap: 0.25rem;
+.change-ownership-grid-wrapper {
+  margin: 1.25rem;
+  .change-ownership-grid {
+    grid-auto-flow: unset;
+    grid-template-columns: auto 1fr;
+    row-gap: 0.25rem;
+  }
 }
 
 fieldset {
@@ -100,6 +103,10 @@ fieldset {
 
 .add-point-grid {
   grid-template-columns: 2fr 1fr 1fr 1fr auto;
+}
+
+.sensor-grid-row {
+  grid-template-columns: 1fr auto 1fr auto;
 }
 
 .criteria-operators-grid {

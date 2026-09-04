@@ -1,13 +1,27 @@
 @use "../variables" as *;
-@use "sass:color";
 @use "../global/fonts" as *;
+
+// sass-lint:disable space-around-operator no-misspelled-properties
+@property --season-progress {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 0%;
+}
+
+// sass-lint:enable space-around-operator no-misspelled-properties
+
+@keyframes season-progress {
+  from {
+    --season-progress: 0%;
+  }
+
+  to {
+    --season-progress: 100%;
+  }
+}
 
 .promo {
   &.three-d-garden {
-    .garden-bed-3d-model {
-      width: 100vw;
-    }
-
     .overlay {
       .settings-bar {
         button {
@@ -29,17 +43,572 @@
   }
 
   .garden-bed-3d-model {
-    width: calc(100vw + 45rem);
+    width: 100vw;
     position: relative;
     height: 100vh;
     cursor: grab;
+    touch-action: none;
+  }
 
-    &:active {
-      cursor: grabbing;
+  .three-d-object-popup-wrapper {
+    pointer-events: none;
+  }
+
+  .grid-action-controls-wrapper {
+    pointer-events: none;
+  }
+
+  .grid-action-controls {
+    display: flex;
+    gap: 1rem;
+    pointer-events: auto;
+
+    .grid-point-color-picker {
+      display: flex;
+      position: relative;
     }
 
-    @media screen and (max-width: 768px) {
-      width: 100vw;
+    .grid-point-color-menu {
+      position: absolute;
+      bottom: 4.5rem;
+      left: 50%;
+      width: 13rem;
+      padding: 0.4rem;
+      background: var(--main-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 0.4rem;
+      box-shadow: var(--box-shadow);
+      backdrop-filter: var(--blur);
+      transform: translateX(-50%);
+
+      .color-picker-cluster,
+      .color-picker-item-wrapper {
+        display: inline-block;
+      }
+    }
+
+    .grid-action-button {
+      display: grid;
+      width: 3.5rem;
+      height: 3.5rem;
+      margin: 0;
+      padding: 0;
+      float: none;
+      place-items: center;
+      border: 0;
+      border-radius: 50%;
+      color: $off_white;
+      font-size: 1.5rem;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow:
+      inset 0 -1px 0 $translucent2,
+      0 0 0.5rem $translucent15;
+      transition:
+      filter 120ms ease,
+      transform 120ms ease;
+
+      &:hover:not(:disabled) {
+        filter: brightness(1.1);
+        transform: scale(1.08);
+      }
+
+      &:active:not(:disabled) {
+        filter: brightness(0.95);
+        transform: scale(0.94);
+      }
+
+      &:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      &.grid-action-cancel {
+        background: $red;
+      }
+
+      &.grid-action-save {
+        background: $green;
+      }
+
+      &.grid-action-packing {
+        background: $medium_gray;
+
+        .grid-packing-icon {
+          width: 2rem;
+          height: 2rem;
+          fill: currentcolor;
+        }
+      }
+
+      &.grid-action-color {
+        text-shadow: 0 1px 2px $translucent5;
+      }
+    }
+  }
+
+  .three-d-object-popup {
+    width: min(30rem, calc(100vw - 2rem));
+    padding: 1rem;
+    padding-top: 0.8rem;
+    color: var(--text-color);
+    cursor: default;
+    pointer-events: auto;
+    background: var(--main-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 0.5rem;
+    box-shadow: var(--box-shadow);
+    backdrop-filter: var(--blur);
+    opacity: 0;
+    transform: translateY(calc(-50% + 0.75rem)) scale(0.98);
+    transform-origin: bottom center;
+    transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+
+    &.visible {
+      opacity: 1;
+      transform: translateY(-50%) scale(1);
+    }
+
+    .object-popup-header {
+      align-items: center;
+
+      h3 {
+        margin: 0;
+        overflow: hidden;
+        font-family: $inknut;
+        font-size: 2rem;
+        font-weight: bold;
+        line-height: 1.4;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+
+        .object-popup-title-coordinates {
+          font-size: 0.65em;
+        }
+
+        .native-jog-coordinate {
+          font-family: monospace;
+        }
+      }
+    }
+
+    .object-popup-button-cluster {
+      align-items: center;
+      justify-self: end;
+
+      .point-color-input {
+        display: grid;
+        padding-right: 0.5rem;
+        place-items: center;
+
+        .saucer {
+          margin: 0;
+        }
+      }
+    }
+
+    .object-popup-content {
+      .native-jog-control-grid {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 0.5rem;
+
+        .native-jog-popup-actions,
+        .native-jog-position-row {
+          display: contents;
+        }
+
+        .fb-button,
+        input {
+          width: 100%;
+          height: 4rem;
+          margin: 0;
+        }
+
+        .native-jog-popup-actions .fb-button:disabled,
+        .native-jog-position-row .fb-button:disabled,
+        .native-jog-position-row input:disabled,
+        .native-jog-step-selector .fb-button:disabled {
+          filter: grayscale(1) brightness(0.7);
+          cursor: not-allowed !important;
+        }
+
+        .native-jog-step-selector {
+          display: flex;
+          grid-row: 1;
+          grid-column: 1 / 5;
+          width: 100%;
+          height: 4rem;
+          box-shadow: none;
+
+          .move-amount {
+            flex: 1;
+            width: auto;
+            padding: 0.5rem 0.25rem;
+            float: none;
+          }
+        }
+
+        .native-jog-negative-button {
+          grid-row: 1;
+          grid-column: 5;
+        }
+
+        .native-jog-positive-button {
+          grid-row: 1;
+          grid-column: 6;
+        }
+
+        .native-jog-home-button {
+          grid-row: 2;
+          grid-column: 1;
+        }
+
+        .native-jog-find-home-button {
+          grid-row: 2;
+          grid-column: 2;
+        }
+
+        .native-jog-limit-button {
+          grid-row: 2;
+          grid-column: 3;
+        }
+
+        .native-jog-position-row {
+          input {
+            grid-row: 2;
+            grid-column: 4 / 6;
+          }
+
+          .native-jog-go-button {
+            grid-row: 2;
+            grid-column: 6;
+
+            > span {
+              position: relative;
+              z-index: 1;
+            }
+
+            .movement-progress {
+              background: $dark_green;
+            }
+          }
+        }
+      }
+
+      .native-jog-popup-actions {
+        .fb-button {
+          display: grid;
+          place-items: center;
+          width: 100%;
+          margin: 0;
+          padding: 0.5rem 0.25rem;
+
+          p {
+            margin: 0;
+            font-size: 1rem;
+          }
+        }
+
+        .home-button {
+          .fa-stack {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            line-height: 1;
+          }
+
+          .fa-stack-2x {
+            top: 50%;
+            left: 50%;
+            width: auto;
+            margin: 0;
+            line-height: 1;
+            transform: translate(-50%, -50%);
+          }
+
+          .fa-stack-1x {
+            top: 5%;
+            left: 5%;
+            width: auto;
+            margin: 0;
+            line-height: 1;
+          }
+        }
+      }
+
+      .native-jog-progress-button {
+        position: relative;
+        isolation: isolate;
+        overflow: hidden;
+
+        &::before,
+        > p,
+        > span,
+        > .fa-stack {
+          z-index: 1;
+        }
+
+        .movement-progress {
+          z-index: 0;
+          pointer-events: none;
+        }
+      }
+
+      .native-jog-encoder-readings {
+        display: grid;
+        gap: 0.5rem;
+
+        .native-jog-encoder-reading {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 1rem;
+          align-items: center;
+
+          output {
+            font-family: monospace;
+            font-weight: bold;
+          }
+        }
+      }
+
+      .native-jog-encoder-settings {
+        display: grid;
+        gap: 0.5rem;
+
+        fieldset {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 1rem;
+          align-items: center;
+          margin: 0;
+        }
+      }
+
+      .native-jog-more-options {
+        display: grid;
+        gap: 1rem;
+
+        .native-jog-more-option-actions {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 0.5rem;
+
+          .fb-button {
+            width: 100%;
+            margin: 0;
+          }
+        }
+
+        a {
+          display: block;
+          padding: 0.5rem;
+          font-size: 1.2rem;
+          text-decoration: none !important;
+
+          .fa-external-link {
+            float: right;
+          }
+        }
+      }
+
+      label {
+        margin-top: 0;
+        font-size: 1rem;
+      }
+
+      .go-button-axes-wrapper {
+        margin: 0;
+        justify-self: end;
+      }
+
+      .object-popup-location-row {
+        align-items: end;
+      }
+
+      .object-popup-coordinate-inputs {
+        align-items: end;
+        min-width: 0;
+
+        > div {
+          min-width: 0;
+        }
+
+        input {
+          width: 100%;
+        }
+      }
+
+      .object-popup-bed-table {
+        width: 100%;
+        border-spacing: 0 0.5rem;
+
+        th {
+          padding-right: 1rem;
+          text-align: left;
+        }
+
+        td {
+          width: 8rem;
+        }
+
+        input {
+          width: 100%;
+        }
+      }
+
+      .point-color-input {
+        align-self: end;
+      }
+
+      .connectivity-popup-content {
+        gap: 1rem;
+
+        .connectivity-diagram {
+          width: 20rem;
+
+          text {
+            font-size: 1.3rem;
+          }
+        }
+
+        .connectivity-summary-table {
+          width: 100%;
+          font-size: 1.2rem;
+
+          th,
+          td {
+            padding: 0.3rem 0.5rem;
+            text-align: left;
+          }
+
+          th {
+            width: 55%;
+          }
+
+          .connectivity-summary-indicator {
+            width: 2rem;
+
+            .saucer {
+              float: right;
+              width: 1rem;
+              height: 1rem;
+              margin: 0;
+              cursor: default;
+            }
+
+            .connectivity-summary-wifi {
+              width: 2.5rem;
+              height: 1rem;
+
+              .percent-bar {
+                position: relative;
+                top: 0;
+                right: auto;
+                width: 100%;
+              }
+            }
+          }
+        }
+      }
+
+      .object-popup-mounted-tool-row {
+        align-items: center;
+      }
+
+      .object-popup-trail-row,
+      .object-popup-laser-row,
+      .object-popup-camera-row,
+      .object-popup-scene-object-row,
+      .object-popup-gantry-beam-row,
+      .object-popup-home-row,
+      .object-popup-tool-action-row {
+        align-items: center;
+
+        button {
+          margin: 0;
+          float: none;
+          justify-self: end;
+        }
+      }
+
+      .tool-action-buttons,
+      .tool-peripheral-action {
+        align-items: center;
+        justify-self: end;
+
+        button {
+          margin: 0;
+          float: none;
+        }
+      }
+
+      .object-popup-tool-verification-row {
+        .tool-verification-status {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 1rem;
+
+          p {
+            margin: 0;
+          }
+
+          button {
+            margin: 0;
+            float: none;
+          }
+        }
+      }
+
+      .object-popup-electronics-controls {
+        min-width: 0;
+
+        .row {
+          align-items: center;
+        }
+
+        .electronics-box-top,
+        .electronics-box-3d-model,
+        .box-top-2d-wrapper {
+          width: 100%;
+          min-width: 0;
+          max-width: 100%;
+        }
+
+        .electronics-box-3d-model {
+          overflow: hidden;
+
+          canvas {
+            width: 100% !important;
+            height: 14rem !important;
+          }
+        }
+
+        button:not(.bp6-button) {
+          margin: 0;
+          float: none;
+          justify-self: end;
+        }
+      }
+    }
+
+    &.telescope-popup {
+      .telescope-popup-content {
+        gap: 1rem;
+
+        p {
+          margin: 0;
+          font-size: 1.2rem;
+          line-height: 1.4;
+        }
+      }
+
     }
   }
 
@@ -139,7 +708,7 @@
         }
       }
 
-      @media screen and (max-width: 768px) {
+      @media screen and (max-width: $tablet_max_width) {
         justify-content: left;
         pointer-events: all;
       }
@@ -188,9 +757,13 @@
         }
       }
 
-      button {
+      button,
+      .season-animation-control {
+        display: flex;
         position: relative;
         z-index: 1;
+        align-items: center;
+        justify-content: center;
         padding: 0 0.85rem;
         border-radius: 2.5rem;
         font-weight: bold;
@@ -198,6 +771,12 @@
         background: none;
         white-space: nowrap;
         color: $off_black;
+
+        &.season-animation-control {
+          width: 2.5rem;
+          height: 2.5rem;
+          padding: 0;
+        }
 
         &.active {
           background: rgba(255, 255, 255, 0.6);
@@ -225,6 +804,37 @@
         &.fall.active {
           background: linear-gradient(15deg, #502402, #c69075);
           color: $off_white;
+        }
+
+        &.winter.active.season-progress {
+          --season-background: linear-gradient(-15deg, #152e40, #3e8dc2);
+        }
+
+        &.spring.active.season-progress {
+          --season-background: linear-gradient(15deg, #055b08, #49cc78);
+        }
+
+        &.summer.active.season-progress {
+          --season-background: linear-gradient(-15deg, #d87f09, #f5e40a);
+        }
+
+        &.fall.active.season-progress {
+          --season-background: linear-gradient(15deg, #502402, #c69075);
+        }
+
+        &.active.season-progress {
+          background-image:
+          linear-gradient(
+            90deg,
+            #0000001f var(--season-progress),
+            transparent 0%),
+          var(--season-background);
+          animation: season-progress var(--season-duration) linear forwards;
+          animation-delay: var(--season-animation-delay);
+        }
+
+        &.active.season-progress-paused {
+          animation: none;
         }
 
         &:hover {
@@ -260,7 +870,7 @@
     backdrop-filter: blur(5px);
     box-shadow: $translucent2 0px 0px 5px;
 
-    @media screen and (max-width: 768px) {
+    @media screen and (max-width: $tablet_max_width) {
       margin: 0 1rem;
     }
   }
@@ -298,18 +908,45 @@
       margin-top: 1rem;
     }
 
-    .config-search {
-      width: 100%;
-      height: 2rem;
-      margin-bottom: 0.5rem;
-      padding: 0.2rem 0.5rem;
-      font-size: 0.85rem;
-      box-shadow: none;
+    .config-search-wrapper {
+      position: relative;
+
+      .config-search {
+        width: 100%;
+        height: 2rem;
+        margin-bottom: 0.5rem;
+        padding: 0.2rem 2rem 0.2rem 0.5rem;
+        font-size: 0.85rem;
+        box-shadow: none;
+      }
+
+      .config-search-clear {
+        position: absolute;
+        top: 0;
+        right: 0;
+        height: 2rem;
+        padding: 0 0.65rem;
+        border: 0;
+        background: transparent;
+        color: $dark_gray;
+        cursor: pointer;
+      }
     }
 
     .config-title {
       color: $off_white;
+      cursor: pointer;
       font-weight: bold;
+
+      .config-expand-toggle {
+        display: inline-block;
+        width: 1.25rem;
+        margin: 0;
+        padding: 0;
+        color: $off_white;
+        text-align: left;
+        vertical-align: middle;
+      }
     }
 
     label {
@@ -646,7 +1283,7 @@
     transform-origin: 50% 50%;
   }
 
-  @media screen and (max-width: 768px) {
+  @media screen and (max-width: $tablet_max_width) {
     .beacon-info-wrapper {
       display: grid;
       position: absolute;
@@ -724,6 +1361,46 @@
         }
       }
     }
+  }
+}
+
+.three-d-required-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  width: 100%;
+  height: 100%;
+  min-height: 23rem;
+  padding: 3rem;
+  color: var(--text-color);
+  background: var(--main-bg);
+  text-align: center;
+  cursor: default;
+
+  > .fa {
+    color: $yellow;
+    font-size: 4rem;
+  }
+
+  h2,
+  p {
+    margin: 0;
+  }
+
+  p {
+    max-width: 44rem;
+  }
+}
+
+.three-d-required-toggle {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+
+  label {
+    margin: 0;
   }
 }
 

@@ -1,8 +1,8 @@
 import React from "react";
 import { Box } from "@react-three/drei";
-import { Arrow } from "./arrow";
 import { Group, MeshPhongMaterial } from "../components";
 import { Text } from "./text";
+import { ControlArrow } from "../controls";
 
 enum BoxDimension {
   width = 300,
@@ -31,7 +31,23 @@ export interface DistanceIndicatorProps {
   visible?: boolean;
 }
 
-export const DistanceIndicator = (props: DistanceIndicatorProps) => {
+const samePoint = (
+  prev: DistanceIndicatorProps["start"],
+  next: DistanceIndicatorProps["start"],
+) =>
+  prev.x === next.x &&
+  prev.y === next.y &&
+  prev.z === next.z;
+
+export const distanceIndicatorPropsEqual = (
+  prev: DistanceIndicatorProps,
+  next: DistanceIndicatorProps,
+) =>
+  prev.visible === next.visible &&
+  samePoint(prev.start, next.start) &&
+  samePoint(prev.end, next.end);
+
+const DistanceIndicatorBase = (props: DistanceIndicatorProps) => {
   const { start, end } = props;
   const dx = end.x - start.x;
   const dy = end.y - start.y;
@@ -45,8 +61,15 @@ export const DistanceIndicator = (props: DistanceIndicatorProps) => {
   return <Group visible={props.visible}
     position={[midX, midY, midZ]}
     rotation={[0, -angleY, angleZ]}>
-    <Arrow length={distance / 2} width={25} />
-    <Arrow length={distance / 2} width={25} rotation={[0, 0, Math.PI]} />
+    <ControlArrow name={"distance-arrow"}
+      start={[-distance / 2, 0, 0]}
+      end={[distance / 2, 0, 0]}
+      width={25}
+      heads={"both"}
+      color={"#ccc"}
+      enabled={false}
+      depthTest={true}
+      depthWrite={true} />
     <Group rotation={[Math.PI / 6, 0, 0]}>
       <Box
         args={[BoxDimension.width, BoxDimension.height, BoxDimension.depth]}
@@ -64,3 +87,8 @@ export const DistanceIndicator = (props: DistanceIndicatorProps) => {
     </Group>
   </Group>;
 };
+
+export const DistanceIndicator = React.memo(
+  DistanceIndicatorBase,
+  distanceIndicatorPropsEqual,
+);

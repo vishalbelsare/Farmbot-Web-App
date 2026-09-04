@@ -1,5 +1,5 @@
 import React from "react";
-import { fireEvent, render } from "@testing-library/react";
+import { act, fireEvent, render } from "@testing-library/react";
 import { FlipperImageProps } from "../interfaces";
 import { fakeImage } from "../../../__test_support__/fake_state/resources";
 import { FlipperImage } from "../flipper_image";
@@ -69,10 +69,10 @@ describe("<FlipperImage />", () => {
   });
 
   it("renders placeholder at specific size", () => {
-    Object.defineProperty(document, "getElementById", {
-      value: () => ({ clientWidth: 200, clientHeight: 100 }),
-      configurable: true,
-    });
+    jest.spyOn(document, "getElementById").mockReturnValue({
+      clientWidth: 200,
+      clientHeight: 100,
+    } as HTMLElement);
     const p = fakeProps();
     p.image.body.attachment_processed_at = undefined;
     const { container } = render(<FlipperImage {...p} />);
@@ -87,9 +87,8 @@ describe("<FlipperImage />", () => {
   });
 
   it("renders placeholder at default size", () => {
-    Object.defineProperty(document, "getElementById", {
-      value: () => ({}), configurable: true,
-    });
+    jest.spyOn(document, "getElementById")
+      .mockReturnValue({} as HTMLElement);
     const p = fakeProps();
     p.image.body.attachment_processed_at = undefined;
     const { container } = render(<FlipperImage {...p} />);
@@ -137,6 +136,7 @@ describe("<FlipperImage />", () => {
     const p = fakeProps();
     p.transformImage = true;
     p.crop = true;
+    p.dark = true;
     p.getConfigValue = () => 2;
     const { container } = render(<FlipperImage {...p} />);
     if (!mapImageCallback) {
@@ -150,8 +150,33 @@ describe("<FlipperImage />", () => {
     Object.defineProperty(fakeImg, "naturalHeight", {
       value: 2, configurable: true,
     });
-    mapImageCallback(fakeImg);
+    act(() => mapImageCallback?.(fakeImg));
     expect(p.onImageLoad).toHaveBeenCalledWith(fakeImg);
+    const svg = container.querySelector("svg");
+    expect(svg).toHaveAttribute("width", "1");
+    expect(svg).toHaveAttribute("height", "2");
+    expect(svg).toHaveAttribute("viewBox", "0 0 1 2");
+  });
+
+  it("keeps the transformed panel responsive", () => {
+    const p = fakeProps();
+    p.transformImage = true;
+    p.getConfigValue = () => 2;
+    const { container } = render(<FlipperImage {...p} />);
+    if (!mapImageCallback) {
+      expect(hasMockedRender(container)).toBeTruthy();
+      return;
+    }
+    const fakeImg = new Image();
+    Object.defineProperty(fakeImg, "naturalWidth", { value: 1 });
+    Object.defineProperty(fakeImg, "naturalHeight", { value: 2 });
+
+    act(() => mapImageCallback?.(fakeImg));
+
+    const svg = container.querySelector("svg");
+    expect(svg).not.toHaveAttribute("width");
+    expect(svg).not.toHaveAttribute("height");
+    expect(svg).toHaveAttribute("viewBox", "0 0 1 2");
   });
 
   it("hovers image", () => {

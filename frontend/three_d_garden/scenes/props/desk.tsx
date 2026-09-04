@@ -1,76 +1,133 @@
 import React from "react";
 import { RepeatWrapping } from "three";
-import { Box, useTexture } from "@react-three/drei";
+import { Box } from "@react-three/drei";
 import { ASSETS } from "../../constants";
-import { threeSpace } from "../../helpers";
-import { Config } from "../../config";
 import { Group, MeshPhongMaterial } from "../../components";
 import { FocusVisibilityGroup } from "../../focus_transition";
+import { useTextureVariant } from "../../texture_variants";
+import { SceneObject } from "farmbot/dist/resources/api_resources";
 
 export interface DeskProps {
-  config: Config;
   activeFocus: string;
+  size: [number, number, number];
+  color: string;
+  texture: SceneObject["texture"];
 }
 
 const deskWidth = 1000;
 const deskDepth = 500;
 const deskHeight = 550;
-const deskOffset = 800;
 const deskLegWidth = 50;
-const deskWoodDarkness = "#666";
 
-export const Desk = (props: DeskProps) => {
-  const { config } = props;
-  const zGround = -config.bedZOffset - config.bedHeight;
-  const deskWoodTextureBase = useTexture(ASSETS.textures.wood + "?=desk");
-  const deskWoodTexture = React.useMemo(() => {
-    const texture = deskWoodTextureBase.clone();
-    texture.wrapS = RepeatWrapping;
-    texture.wrapT = RepeatWrapping;
-    texture.repeat.set(0.3, 0.3);
-    return texture;
-  }, [deskWoodTextureBase]);
-  const screenTextureBase = useTexture(ASSETS.textures.screen + "?=screen");
-  const screenTexture = React.useMemo(() => {
-    const texture = screenTextureBase.clone();
-    texture.rotation = Math.PI / 2;
-    texture.wrapT = RepeatWrapping;
-    return texture;
-  }, [screenTextureBase]);
+export const deskPropsEqual = (prev: DeskProps, next: DeskProps) =>
+  prev.activeFocus === next.activeFocus &&
+  prev.color === next.color &&
+  prev.texture === next.texture &&
+  prev.size[0] === next.size[0] &&
+  prev.size[1] === next.size[1] &&
+  prev.size[2] === next.size[2];
+
+const DESK_BOUNDS = {
+  width: deskDepth,
+  height: deskWidth,
+  depth: deskHeight + 50,
+};
+
+const DeskBase = (props: DeskProps) => {
+  const textureUrl = props.texture === "none"
+    ? ASSETS.textures.wood
+    : ASSETS.textures[props.texture];
+  const deskTexture = useTextureVariant(textureUrl, {
+    wrapS: RepeatWrapping,
+    wrapT: RepeatWrapping,
+    repeat: [0.3, 0.3],
+  });
+  const size = props.size;
+  const scale = React.useMemo(() => [
+    size[0] / DESK_BOUNDS.width,
+    size[1] / DESK_BOUNDS.height,
+    size[2] / DESK_BOUNDS.depth,
+  ] as [number, number, number], [size]);
+  const centerOffset = DESK_BOUNDS.depth / 2;
+
   return <FocusVisibilityGroup name={"desk"}
-    visible={props.config.desk && props.activeFocus == ""}
-    position={[
-      threeSpace(config.bedLengthOuter + deskOffset, config.bedLengthOuter),
-      threeSpace(config.bedWidthOuter / 2, config.bedWidthOuter),
-      zGround,
-    ]}>
-    <Box
-      name={"desk-top"}
-      castShadow={true}
-      receiveShadow={true}
-      args={[deskDepth, deskWidth, 50]}
-      position={[0, 0, deskHeight + 25]}>
-      <MeshPhongMaterial map={deskWoodTexture} color={deskWoodDarkness} />
-    </Box>
-    <Group name={"desk-legs"}>
-      {[
-        [(-deskDepth + deskLegWidth) / 2, (-deskWidth + deskLegWidth) / 2],
-        [(-deskDepth + deskLegWidth) / 2, (deskWidth - deskLegWidth) / 2],
-        [(deskDepth - deskLegWidth) / 2, (-deskWidth + deskLegWidth) / 2],
-        [(deskDepth - deskLegWidth) / 2, (deskWidth - deskLegWidth) / 2],
-      ].map(([xOffset, yOffset], index) =>
+    visible={props.activeFocus == ""}>
+    <Group scale={scale}>
+      <Group position={[0, 0, -centerOffset]}>
         <Box
-          name={"desk-leg"}
-          key={index}
+          name={"desk-top"}
           castShadow={true}
           receiveShadow={true}
-          args={[deskLegWidth, deskLegWidth, deskHeight]}
-          position={[xOffset, yOffset, deskHeight / 2]}>
-          <MeshPhongMaterial map={deskWoodTexture} color={deskWoodDarkness} />
-        </Box>)}
+          args={[deskDepth, deskWidth, 50]}
+          position={[0, 0, deskHeight + 25]}>
+          <MeshPhongMaterial
+            key={props.texture}
+            map={props.texture === "none" ? undefined : deskTexture}
+            color={props.color} />
+        </Box>
+        <Group name={"desk-legs"}>
+          {[
+            [(-deskDepth + deskLegWidth) / 2, (-deskWidth + deskLegWidth) / 2],
+            [(-deskDepth + deskLegWidth) / 2, (deskWidth - deskLegWidth) / 2],
+            [(deskDepth - deskLegWidth) / 2, (-deskWidth + deskLegWidth) / 2],
+            [(deskDepth - deskLegWidth) / 2, (deskWidth - deskLegWidth) / 2],
+          ].map(([xOffset, yOffset], index) =>
+            <Box
+              name={"desk-leg"}
+              key={index}
+              castShadow={true}
+              receiveShadow={true}
+              args={[deskLegWidth, deskLegWidth, deskHeight]}
+              position={[xOffset, yOffset, deskHeight / 2]}>
+              <MeshPhongMaterial
+                key={props.texture}
+                map={props.texture === "none" ? undefined : deskTexture}
+                color={props.color} />
+            </Box>)}
+        </Group>
+      </Group>
     </Group>
-    <Group name={"laptop"}
-      position={[0, 0, deskHeight + 50]}>
+  </FocusVisibilityGroup>;
+};
+
+export const Desk = React.memo(DeskBase, deskPropsEqual);
+
+export const LAPTOP_BOUNDS = {
+  width: 337,
+  height: 300,
+  depth: 200,
+};
+
+export interface LaptopProps {
+  size: [number, number, number];
+}
+
+const sameSize = (
+  prev: [number, number, number],
+  next: [number, number, number],
+) =>
+  prev === next || (
+    prev[0] === next[0] &&
+    prev[1] === next[1] &&
+    prev[2] === next[2]);
+
+export const laptopPropsEqual = (prev: LaptopProps, next: LaptopProps) =>
+  sameSize(prev.size, next.size);
+
+const LaptopBase = (props: LaptopProps) => {
+  const screenTexture = useTextureVariant(ASSETS.textures.screen, {
+    wrapT: RepeatWrapping,
+    rotation: Math.PI / 2,
+  });
+  const scale = React.useMemo(() => [
+    props.size[0] / LAPTOP_BOUNDS.width,
+    props.size[1] / LAPTOP_BOUNDS.height,
+    props.size[2] / LAPTOP_BOUNDS.depth,
+  ] as [number, number, number], [props.size]);
+  const centerOffset = LAPTOP_BOUNDS.depth / 2;
+
+  return <Group name={"laptop"} scale={scale}>
+    <Group position={[0, 0, -centerOffset]}>
       <Group name={"laptop-bottom"}
         position={[0, 0, 5]}>
         <Box
@@ -114,5 +171,7 @@ export const Desk = (props: DeskProps) => {
         </Box>
       </Group>
     </Group>
-  </FocusVisibilityGroup>;
+  </Group>;
 };
+
+export const Laptop = React.memo(LaptopBase, laptopPropsEqual);

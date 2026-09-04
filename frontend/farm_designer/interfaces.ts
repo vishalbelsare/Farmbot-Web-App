@@ -21,16 +21,21 @@ import type {
   TaggedPlantTemplate,
   TaggedPlantPointer,
   TaggedCurve,
+  TaggedFbosConfig,
   PlantStage,
+  TaggedDevice,
+  TaggedPeripheral,
+  TaggedSceneObject,
 } from "farmbot";
 import type { SlotWithTool, ResourceIndex, UUID } from "../resources/interfaces";
 import type {
-  BotPosition, BotLocationData, SourceFbosConfig,
+  BotPosition, BotLocationData, BotState, SourceFbosConfig, UserEnv,
 } from "../devices/interfaces";
 import { isNumber } from "lodash";
 import type {
   AxisNumberProperty, BotSize, MapTransformProps, TaggedPlant,
 } from "./map/interfaces";
+import type { SceneObjectFormValues } from "../scene_objects/interfaces";
 import type { SelectionBoxData } from "./map/background";
 import type { GetWebAppConfigValue } from "../config_storage/actions";
 import type {
@@ -72,6 +77,7 @@ export interface State extends TypeCheckerHint {
   show_zones: boolean;
   show_sensor_readings: boolean;
   show_moisture_interpolation_map: boolean;
+  show_scene_objects: boolean;
   bot_origin_quadrant: BotOriginQuadrant;
   zoom_level: number;
 }
@@ -85,7 +91,10 @@ export interface MountedToolInfo {
 
 export interface FarmDesignerProps {
   dispatch: Function;
+  resources: ResourceIndex;
   device: DeviceAccountSettings;
+  deviceAccount?: TaggedDevice;
+  bot?: BotState;
   selectedPlant: TaggedPlant | undefined;
   designer: DesignerState;
   hoveredPlant: TaggedPlant | undefined;
@@ -96,16 +105,25 @@ export interface FarmDesignerProps {
   tools: TaggedTool[];
   toolSlots: SlotWithTool[];
   crops: TaggedCrop[];
+  sequences?: TaggedSequence[];
+  fbosConfig?: TaggedFbosConfig;
   botLocationData: BotLocationData;
   botMcuParams: McuParams;
   botSize: BotSize;
   peripheralValues: PeripheralValues;
+  peripherals: TaggedPeripheral[];
   eStopStatus: boolean;
   latestImages: TaggedImage[];
   cameraCalibrationData: CameraCalibrationData;
   timeSettings: TimeSettings;
+  botOnline?: boolean;
+  arduinoBusy?: boolean;
+  currentBotLocation?: BotPosition;
+  movementState?: MovementState;
+  defaultAxes?: string;
   getConfigValue: GetWebAppConfigValue;
   sensorReadings: TaggedSensorReading[];
+  sceneObjects: TaggedSceneObject[];
   sensors: TaggedSensor[];
   groups: TaggedPointGroup[];
   mountedToolInfo: MountedToolInfo;
@@ -113,6 +131,7 @@ export interface FarmDesignerProps {
   logs: TaggedLog[];
   deviceTarget: string;
   sourceFbosConfig: SourceFbosConfig;
+  env: UserEnv;
   farmwareEnvs: TaggedFarmwareEnv[];
   children?: React.ReactNode;
   curves: TaggedCurve[];
@@ -139,6 +158,9 @@ export interface DesignerState {
   hoveredPoint: string | undefined;
   hoveredSpread: number | undefined;
   hoveredPlantListItem: string | undefined;
+  hoveredSceneObject: string | undefined;
+  featuredScene: string | undefined;
+  highlighted3DObject: string | undefined;
   hoveredToolSlot: string | undefined;
   hoveredSensorReading: string | undefined;
   hoveredImage: string | undefined;
@@ -148,6 +170,9 @@ export interface DesignerState {
   bulkPlantSlug: string | undefined;
   chosenLocation: BotPosition;
   drawnPoint: DrawnPointPayl | undefined;
+  drawnSceneObject: SceneObjectFormValues | undefined;
+  focusedSceneObjectField: string | undefined;
+  unifiedSceneObjectSize: string | undefined;
   openedSavedGarden: number | undefined;
   tryGroupSortType: ExtendedPointGroupSortType | undefined;
   editGroupAreaInMap: boolean;
@@ -165,6 +190,9 @@ export interface DesignerState {
   cameraViewGridId: string | undefined;
   gridIds: string[];
   gridStart: Record<"x" | "y", number>;
+  gridPlanting: GridPlantingRequest | undefined;
+  legacyGridPlantingCrop: string | undefined;
+  legacyPointGrid: boolean;
   soilHeightLabels: boolean;
   profileOpen: boolean;
   profileAxis: "x" | "y";
@@ -179,11 +207,34 @@ export interface DesignerState {
   cropRadius: number | undefined;
   distanceIndicator: string;
   panelOpen: boolean;
-  threeDTopDownView: boolean | undefined;
+  threeDAreaSelectionMode: boolean;
+  threeDCameraFollow: boolean;
+  threeDUTMFollow: boolean;
   threeDCameraSelection: boolean;
   threeDExaggeratedZ: boolean;
+  threeDPerspective: boolean | undefined;
+  threeDSectionOpen: boolean;
+  threeDSectionAxis: ThreeDSectionAxis;
+  threeDSectionCenter: Record<"x" | "y", number | undefined>;
+  threeDSectionWidth: number;
+  threeDSectionFollowBot: boolean;
+  threeDSectionClipAll: boolean;
+  threeDViewMode: ThreeDViewMode;
+  threeDStargazingFov: number;
+  threeDViewRequest: ({
+    direction: [number, number, number];
+  } | {
+    reset: true;
+  }) & {
+    nonce: number;
+  } | undefined;
   threeDTime: string | undefined;
 }
+
+export type ThreeDDesignerState = Omit<DesignerState, "panelOpen">;
+
+export type ThreeDSectionAxis = "x" | "y";
+export type ThreeDViewMode = "normal" | "stargazing" | "spaceflight";
 
 export type TaggedExecutable = TaggedSequence | TaggedRegimen;
 export type ExecutableQuery =
@@ -328,6 +379,18 @@ export interface HoveredPlantPayl {
   plantUUID: string | undefined;
 }
 
+export interface GridPlantingRequest {
+  token: string;
+  gridId: string;
+  gridType?: "plant" | "point";
+  cropSlug?: string;
+  itemName: string;
+  defaultSpacing: number;
+  radius?: number;
+  z?: number;
+  meta?: Record<string, string | undefined>;
+}
+
 export interface CropCatalogProps {
   dispatch: Function;
   plant: TaggedPlantPointer | undefined;
@@ -363,12 +426,15 @@ export interface CameraCalibrationData {
   calibrationZ: string | undefined;
 }
 
+export type PointPlacementPhase = "position" | "finalize";
+
 export interface DrawnPointPayl {
   name: string;
   cx: number | undefined;
   cy: number | undefined;
-  z: number;
+  z: number | undefined;
   r: number;
   color: string;
   at_soil_level: boolean;
+  placementPhase?: PointPlacementPhase;
 }

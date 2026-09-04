@@ -102,13 +102,15 @@ module Devices
       end
 
       def add_soil_height_points(product_line)
+        max_x = product_line.include?("xl") ? 5700 : 2700
+        max_y = product_line.include?("xl") ? 2700 : 1200
         4.times do
           4.times do
             Points::Create.run!(device: device,
                                 pointer_type: "GenericPointer",
                                 name: "Soil Height",
-                                x: rand(0..(product_line.include?("xl") ? 5700 : 2700)),
-                                y: rand(0..(product_line.include?("xl") ? 2700 : 1200)),
+                                x: rand(0..max_x).round(-1),
+                                y: rand(0..max_y).round(-1),
                                 z: rand(-550..-450),
                                 radius: 0,
                                 meta: { color: "gray", at_soil_level: "true" })
@@ -125,6 +127,7 @@ module Devices
       def add_envs
         [
           %w[CAMERA_CALIBRATION_coord_scale 1],
+          %w[CAMERA_CALIBRATION_camera_z 0],
           %w[CAMERA_CALIBRATION_center_pixel_location_x 320],
           %w[CAMERA_CALIBRATION_center_pixel_location_y 240],
         ].each do |key, value|
@@ -170,13 +173,13 @@ module Devices
       #    tester FBOS version `1000.0.0`.
       READ_COMMENT_ABOVE = "100.0.0"
 
-      def before_product_line_seeder
+      def before_product_line_seeder(product_line)
         device
           .web_app_config
           .update!(
             discard_unsaved: true,
-            three_d_garden: true,
           )
+        stress_data(product_line)&.update_demo_settings
         device
           .fbos_config
           .update!(
@@ -187,16 +190,17 @@ module Devices
 
       def after_product_line_seeder(product_line)
         create_webcam_feed(product_line)
-        stress_count = Devices::Seeders::StressData.count_for(product_line)
-        if stress_count
-          Devices::Seeders::StressData.new(device, stress_count).seed!
+        if (data = stress_data(product_line))
+          data.seed!
         else
           add_plants(product_line)
           add_soil_height_points(product_line)
         end
         add_point_groups
         tool = device.tools.find_by(name: ToolNames::WATERING_NOZZLE)
-        Tools::Update.run(tool: tool, flow_rate_ml_per_s: 100) if tool
+        Tools::Update.run(tool: tool,
+                          device: device,
+                          flow_rate_ml_per_s: 100) if tool
         add_envs
 
         marketing_bulletin
@@ -209,6 +213,11 @@ module Devices
           .map { |p| Logs::Create.run!(p) }
         device
           .update!(fbos_version: READ_COMMENT_ABOVE)
+      end
+
+      def stress_data(product_line)
+        stress_count = Devices::Seeders::StressData.count_for(product_line)
+        Devices::Seeders::StressData.new(device, stress_count) if stress_count
       end
     end
   end

@@ -157,8 +157,8 @@ export class RawSelectPlants
   };
 
   componentDidMount() {
-    const { dispatch, selected } = this.props;
-    if (selected && selected.length == 1) {
+    const { dispatch, selected, selectionPointType } = this.props;
+    if (selected && selected.length == 1 && !selectionPointType) {
       unselectPlant(dispatch)();
     } else {
       dispatch(setHoveredPlant(undefined));
@@ -363,6 +363,7 @@ export class RawSelectPlants
 
   render() {
     const { dispatch } = this.props;
+    const is3D = this.props.getConfigValue(BooleanSetting.three_d_garden);
     return <DesignerPanel panelName={"plant-selection"}
       panelColor={PanelColor.gray}>
       <DesignerPanelHeader
@@ -373,7 +374,7 @@ export class RawSelectPlants
           { length: this.selected.length, name: this.itemName })}
         backTo={Path.plants()}
         onBack={unselectPlant(dispatch)}
-        description={Content.BOX_SELECT_DESCRIPTION} />
+        description={is3D ? undefined : Content.BOX_SELECT_DESCRIPTION} />
       <this.ActionButtons />
 
       <DesignerPanelContent panelName={"plant-selection"}>

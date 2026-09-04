@@ -1,6 +1,6 @@
 import React from "react";
 import { render } from "@testing-library/react";
-import { Greenhouse, GreenhouseProps } from "../greenhouse";
+import { Greenhouse, greenhousePropsEqual, GreenhouseProps } from "../greenhouse";
 import { INITIAL } from "../../config";
 import { clone } from "lodash";
 
@@ -18,12 +18,31 @@ describe("<Greenhouse />", () => {
     const { container } = render(<Greenhouse {...p} />);
     expect(container).toContainHTML("greenhouse-environment");
     expect(container).not.toContainHTML("people");
-    expect(container).toContainHTML("starter-trays");
-    expect(container).toContainHTML("starter-tray-bases");
-    expect(container).toContainHTML("starter-tray-seedlings");
-    expect(container).toContainHTML("left-greenhouse-wall");
-    expect(container).toContainHTML("right-greenhouse-wall");
-    expect(container).toContainHTML("potted-plant");
+  });
+
+  it("memoizes unchanged scene props", () => {
+    const p = fakeProps();
+    p.config.scene = "Greenhouse";
+    render(<Greenhouse {...p} />);
+    const memoized = Greenhouse as unknown as { $$typeof: symbol };
+    expect(memoized.$$typeof.toString()).toContain("react.memo");
+  });
+
+  it("compares greenhouse-relevant config fields", () => {
+    const p = fakeProps();
+    p.config.scene = "Greenhouse";
+    expect(greenhousePropsEqual(p, {
+      ...p,
+      config: { ...p.config, sun: p.config.sun + 1 },
+    })).toBeTruthy();
+    expect(greenhousePropsEqual(p, {
+      ...p,
+      config: { ...p.config, people: !p.config.people },
+    })).toBeFalsy();
+    expect(greenhousePropsEqual(p, {
+      ...p,
+      activeFocus: "potted-plant",
+    })).toBeFalsy();
   });
 
   it("not visible when scene is not greenhouse", () => {

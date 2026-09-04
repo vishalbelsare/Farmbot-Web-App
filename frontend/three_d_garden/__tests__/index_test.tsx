@@ -1,47 +1,114 @@
 import React from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import {
-  ThreeDGardenProps, ThreeDGarden, ThreeDGardenToggle, ThreeDGardenToggleProps,
+  applyViewRequest, consumeViewRequest, ThreeDGardenProps, ThreeDGarden,
 } from "../index";
+import { VIEW_PRISM_VIEWPORT_SIZE } from "../garden_model";
 import * as reactThreeFiber from "@react-three/fiber";
 import { INITIAL, INITIAL_POSITION } from "../config";
 import { clone } from "lodash";
 import { fakeAddPlantProps } from "../../__test_support__/fake_props";
-import { fakeDesignerState } from "../../__test_support__/fake_designer_state";
-import { Path } from "../../internal_urls";
+import { createPanelCameraStore } from "../panel_camera";
+import { filterSectionIntersections } from "../section";
 import { Actions } from "../../constants";
-import * as configStorageActions from "../../config_storage/actions";
-import { BooleanSetting } from "../../session_keys";
-import { fakeDevice } from "../../__test_support__/resource_index_builder";
+import { bot } from "../../__test_support__/fake_state/bot";
+import { buildResourceIndex } from
+  "../../__test_support__/resource_index_builder";
 
 beforeEach(() => {
   console.log = jest.fn();
   window.localStorage.clear();
   delete window.__fbPerf;
-  jest.spyOn(configStorageActions, "getWebAppConfigValue")
-    .mockImplementation(() => () => false);
-  jest.spyOn(configStorageActions, "setWebAppConfigValue")
-    .mockImplementation(jest.fn());
 });
 
 afterEach(() => {
   window.localStorage.clear();
   delete window.__fbPerf;
+  jest.restoreAllMocks();
 });
 
 describe("<ThreeDGarden />", () => {
   const fakeProps = (): ThreeDGardenProps => ({
-    config: clone(INITIAL),
+    config: { ...clone(INITIAL), viewCube: true },
+    resources: buildResourceIndex().index,
     configPosition: clone(INITIAL_POSITION),
+    firmwareSettings: bot.hardware.mcu_params,
+    panelCameraStore: createPanelCameraStore(true),
     addPlantProps: fakeAddPlantProps(),
     mapPoints: [],
     weeds: [],
     threeDPlants: [],
+    sceneObjects: [],
+  });
+
+  it("applies palette camera requests through the view prism bridge", () => {
+    const selectDirection = jest.fn();
+    const resetView = jest.fn();
+    const bridgeRef = { current: { selectDirection, resetView } };
+    expect(applyViewRequest(
+      bridgeRef, { direction: [1, 0, 1], nonce: 1 })).toEqual(true);
+    expect(selectDirection).toHaveBeenCalledWith([1, 0, 1]);
+    expect(applyViewRequest(
+      bridgeRef, { reset: true, nonce: 2 })).toEqual(true);
+    expect(resetView).toHaveBeenCalledTimes(1);
+    expect(applyViewRequest(bridgeRef, undefined)).toEqual(false);
+    expect(applyViewRequest({ current: {} }, {
+      direction: [1, 0, 1], nonce: 2,
+    })).toEqual(false);
+    expect(applyViewRequest(
+      { current: { selectDirection } },
+      { reset: true, nonce: 3 },
+    )).toEqual(false);
+    expect(selectDirection).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears palette camera requests after applying them", () => {
+    const dispatch = jest.fn();
+    const selectDirection = jest.fn();
+    const bridgeRef = { current: { selectDirection } };
+    expect(consumeViewRequest(bridgeRef, {
+      direction: [-1, 1, 1], nonce: 1,
+    }, dispatch)).toEqual(true);
+    expect(selectDirection).toHaveBeenCalledWith([-1, 1, 1]);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: Actions.SET_3D_VIEW,
+      payload: undefined,
+    });
+    expect(consumeViewRequest(bridgeRef, undefined, dispatch)).toEqual(false);
+    expect(dispatch).toHaveBeenCalledTimes(1);
   });
 
   it("renders", () => {
+    const canvasSpy = jest.spyOn(reactThreeFiber, "Canvas");
     const { container } = render(<ThreeDGarden {...fakeProps()} />);
     expect(container).toContainHTML("three-d-garden");
+    const viewport = container.querySelector(".view-prism-viewport");
+    expect(viewport).toHaveStyle({
+      width: `${VIEW_PRISM_VIEWPORT_SIZE}px`,
+      height: `${VIEW_PRISM_VIEWPORT_SIZE}px`,
+    });
+    expect(canvasSpy).toHaveBeenCalledTimes(2);
+    expect(canvasSpy.mock.calls[0][0].events).toEqual(expect.any(Function));
+    const store = {} as never;
+    expect(canvasSpy.mock.calls[0][0].events?.(store)).toEqual({
+      enabled: true,
+      filter: filterSectionIntersections,
+    });
+    expect(reactThreeFiber.events).toHaveBeenCalledWith(store);
+    expect(canvasSpy.mock.calls[0][0]).toEqual(expect.objectContaining({
+      gl: { alpha: true },
+      style: { backgroundColor: "#2c362f" },
+    }));
+    expect(canvasSpy).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        gl: { alpha: true },
+        camera: expect.objectContaining({
+          position: [0, 0, expect.any(Number)],
+          fov: 40,
+        }),
+      }),
+      undefined,
+    );
   });
 
   it("disables canvas shadows in low-detail mode", () => {
@@ -55,107 +122,38 @@ describe("<ThreeDGarden />", () => {
     canvasSpy.mockRestore();
   });
 
+  it("hides the product view prism when disabled", () => {
+    const canvasSpy = jest.spyOn(reactThreeFiber, "Canvas");
+    const p = fakeProps();
+    p.config.viewCube = false;
+    const { container } = render(<ThreeDGarden {...p} />);
+    expect(container.querySelector(".view-prism-viewport")).toBeFalsy();
+    expect(canvasSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("counts benchmark renders", () => {
     window.localStorage.setItem("FB_PERF_BENCHMARK", "true");
     render(<ThreeDGarden {...fakeProps()} />);
     expect(window.__fbPerf?.counts["render.ThreeDGarden"]).toEqual(1);
     expect(window.__fbPerf?.marks.three_d_garden_mounted.length).toEqual(1);
   });
-});
 
-describe("<ThreeDGardenToggle />", () => {
-  const fakeProps = (): ThreeDGardenToggleProps => ({
-    navigate: jest.fn(),
-    dispatch: jest.fn(),
-    device: fakeDevice().body,
-    designer: fakeDesignerState(),
-    threeDGarden: true,
-    getConfigValue: jest.fn(),
+  it("skips rerenders when canvas props are unchanged", () => {
+    window.localStorage.setItem("FB_PERF_BENCHMARK", "true");
+    const p = fakeProps();
+    const { rerender } = render(<ThreeDGarden {...p} />);
+    rerender(<ThreeDGarden {...p} />);
+    expect(window.__fbPerf?.counts["render.ThreeDGarden"]).toEqual(1);
   });
 
-  it("renders off", () => {
+  it("isolates panel camera store updates", () => {
+    window.localStorage.setItem("FB_PERF_BENCHMARK", "true");
     const p = fakeProps();
-    p.threeDGarden = false;
-    render(<ThreeDGardenToggle {...p} />);
-    const settingsButton = screen.queryByTitle("3D Settings");
-    const toggle = screen.queryByTitle("show");
-    expect(settingsButton).not.toBeInTheDocument();
-    expect(toggle).toBeInTheDocument();
-  });
+    render(<ThreeDGarden {...p} />);
 
-  it("navigates to settings", () => {
-    const p = fakeProps();
-    render(<ThreeDGardenToggle {...p} />);
-    const settingsButton = screen.getByTitle("3D Settings");
-    fireEvent.click(settingsButton);
-    expect(p.navigate).toHaveBeenCalledWith(Path.settings("3d_garden"));
-  });
+    act(() => p.panelCameraStore.setOpen(false));
 
-  it("disables top down view", () => {
-    const p = fakeProps();
-    p.designer.threeDTopDownView = true;
-    render(<ThreeDGardenToggle {...p} />);
-    const isoViewButton = screen.getByTitle("3D View");
-    fireEvent.click(isoViewButton);
-    expect(p.dispatch).toHaveBeenCalledWith({
-      type: Actions.TOGGLE_3D_TOP_DOWN_VIEW,
-      payload: false,
-    });
-  });
-
-  it("uses saved top down setting", () => {
-    const p = fakeProps();
-    p.getConfigValue = () => true;
-    render(<ThreeDGardenToggle {...p} />);
-    const isoViewButton = screen.getByTitle("3D View");
-    fireEvent.click(isoViewButton);
-    expect(p.dispatch).toHaveBeenCalledWith({
-      type: Actions.TOGGLE_3D_TOP_DOWN_VIEW,
-      payload: false,
-    });
-  });
-
-  it("enables top down view", () => {
-    const p = fakeProps();
-    render(<ThreeDGardenToggle {...p} />);
-    const topDownViewButton = screen.getByTitle("Top down View");
-    fireEvent.click(topDownViewButton);
-    expect(p.dispatch).toHaveBeenCalledWith({
-      type: Actions.TOGGLE_3D_TOP_DOWN_VIEW,
-      payload: true,
-    });
-  });
-
-  it("disables exaggerated z", () => {
-    const p = fakeProps();
-    p.designer.threeDExaggeratedZ = true;
-    render(<ThreeDGardenToggle {...p} />);
-    const isoViewButton = screen.getByTitle("normal z");
-    fireEvent.click(isoViewButton);
-    expect(p.dispatch).toHaveBeenCalledWith({
-      type: Actions.TOGGLE_3D_EXAGGERATED_Z,
-      payload: false,
-    });
-  });
-
-  it("enables exaggerated z", () => {
-    const p = fakeProps();
-    render(<ThreeDGardenToggle {...p} />);
-    const topDownViewButton = screen.getByTitle("exaggerated z");
-    fireEvent.click(topDownViewButton);
-    expect(p.dispatch).toHaveBeenCalledWith({
-      type: Actions.TOGGLE_3D_EXAGGERATED_Z,
-      payload: true,
-    });
-  });
-
-  it("toggles 3D view", () => {
-    const p = fakeProps();
-    render(<ThreeDGardenToggle {...p} />);
-    const toggle = screen.getByTitle("hide");
-    fireEvent.click(toggle);
-    expect(configStorageActions.setWebAppConfigValue).toHaveBeenCalledWith(
-      BooleanSetting.three_d_garden,
-      false);
+    expect(p.panelCameraStore.getSnapshot()).toBeFalsy();
+    expect(window.__fbPerf?.counts["render.ThreeDGarden"]).toEqual(1);
   });
 });

@@ -1,16 +1,18 @@
 import React from "react";
+import { useSpring } from "@react-spring/three";
 import { Config } from "../config";
-import { HOVER_OBJECT_MODES, RenderOrder } from "../constants";
+import { RenderOrder } from "../constants";
 import { Billboard } from "@react-three/drei";
 import {
   Vector3,
   Group as GroupType,
   Color,
   WebGLProgramParametersWithUniforms,
-  InstancedMesh as InstancedMeshType,
+  InstancedMesh as ThreeInstancedMesh,
   Matrix4,
   Quaternion,
   InstancedBufferAttribute,
+  DoubleSide,
 } from "three";
 import {
   getGardenPositionFunc,
@@ -19,19 +21,26 @@ import {
   get3DPositionFunc,
 } from "../helpers";
 import { Text } from "../elements";
-import { isUndefined } from "lodash";
 import { Path } from "../../internal_urls";
-import { useNavigate } from "react-router";
-import { setPanelOpen } from "../../farm_designer/panel_header";
 import { getMode, round } from "../../farm_designer/map/util";
-import { ThreeEvent, useFrame } from "@react-three/fiber";
+import { useFrame } from "@react-three/fiber";
 import { InstancedMesh, MeshPhongMaterial, SphereGeometry } from "../components";
 import {
   getSpreadOverlap, getSpreadRadii,
 } from "../../farm_designer/map/layers/spread/spread_overlap_helper";
 import { ActivePositionRef } from "../bed/objects/pointer_objects";
 import { Mode } from "../../farm_designer/map/interfaces";
-import { findCrop } from "../../crops/find";
+import { findCropMetadata } from "../../crops/metadata";
+import { perfMeasure } from "../../performance/perf";
+import {
+  ThreeDObjectHoverHandler, ThreeDObjectSelectionHandler,
+} from "../selection_types";
+import { SPREAD_SPHERE_SEGMENTS } from "./geometry_detail";
+
+const spreadLayerSpringConfig = {
+  tension: 240,
+  friction: 30,
+};
 
 export interface ThreeDGardenPlant {
   id?: number | undefined;
@@ -45,15 +54,60 @@ export interface ThreeDGardenPlant {
   seed: number;
 }
 
-export interface ThreeDPlantLabelProps {
+export type PlantLabelConfig = Pick<Config,
+  "bedLengthOuter" | "bedWidthOuter" | "bedXOffset" | "bedYOffset"
+  | "columnLength" | "labels" | "labelsOnHover" | "mirrorX" | "mirrorY"
+  | "zGantryOffset">;
+
+export interface ThreeDPlantLabelProps<
+  TConfig extends PlantLabelConfig = Config,
+> {
   plant: ThreeDGardenPlant;
   i: number;
-  config: Config;
+  config: TConfig;
   hoveredPlant: number | undefined;
   getZ(x: number, y: number): number;
 }
 
-export const ThreeDPlantLabel = (props: ThreeDPlantLabelProps) => {
+type PlantLabelProps = ThreeDPlantLabelProps<PlantLabelConfig | Config>;
+
+const plantLabelVisible = (props: PlantLabelProps) =>
+  (props.config.labels && !props.config.labelsOnHover)
+  || props.i === props.hoveredPlant;
+
+const plantLabelConfigEqual = (
+  prev: PlantLabelConfig,
+  next: PlantLabelConfig,
+) =>
+  prev.bedLengthOuter == next.bedLengthOuter
+  && prev.bedWidthOuter == next.bedWidthOuter
+  && prev.bedXOffset == next.bedXOffset
+  && prev.bedYOffset == next.bedYOffset
+  && prev.columnLength == next.columnLength
+  && prev.zGantryOffset == next.zGantryOffset
+  && prev.mirrorX == next.mirrorX
+  && prev.mirrorY == next.mirrorY;
+
+const plantLabelPlantEqual = (
+  prev: ThreeDGardenPlant,
+  next: ThreeDGardenPlant,
+) =>
+  prev.label == next.label
+  && prev.size == next.size
+  && prev.x == next.x
+  && prev.y == next.y;
+
+const plantLabelPropsEqual = (
+  prev: PlantLabelProps,
+  next: PlantLabelProps,
+) =>
+  prev.i == next.i
+  && prev.getZ == next.getZ
+  && plantLabelVisible(prev) == plantLabelVisible(next)
+  && plantLabelConfigEqual(prev.config, next.config)
+  && plantLabelPlantEqual(prev.plant, next.plant);
+
+const ThreeDPlantLabelBase = (props: PlantLabelProps) => {
   const { i, plant, config, hoveredPlant } = props;
   const alwaysShowLabels = config.labels && !config.labelsOnHover;
   // eslint-disable-next-line no-null/no-null
@@ -78,6 +132,9 @@ export const ThreeDPlantLabel = (props: ThreeDPlantLabelProps) => {
   </Billboard>;
 };
 
+export const ThreeDPlantLabel =
+  React.memo(ThreeDPlantLabelBase, plantLabelPropsEqual);
+
 interface LabelPartProps {
   visible: boolean;
   plant: ThreeDGardenPlant;
@@ -101,25 +158,59 @@ export interface PlantSpreadInstancesProps {
   dispatch?: Function;
   activePositionRef: ActivePositionRef;
   spreadVisible: boolean;
+  forceWhite?: boolean;
   instanceCapacity?: number;
+  routeKey?: string;
+  onSelectObject?: ThreeDObjectSelectionHandler;
+  onHoverObject?: ThreeDObjectHoverHandler;
 }
 
 interface PlantSpreadUpdateState {
   needsInstanceUpdate: boolean;
+  lastUpdateKey: string;
+}
+
+const noRaycast = () => undefined;
+
+interface StaticPlantSpreadInstance {
+  id?: number;
+  x: number;
+  y: number;
+  z: number;
+  positionX: number;
+  positionY: number;
+  size: number;
+  spread: number;
 }
 
 const newPlantSpreadUpdateState = (): PlantSpreadUpdateState => ({
   needsInstanceUpdate: true,
+  lastUpdateKey: "",
 });
 
-export const PlantSpreadInstances = React.memo((props: PlantSpreadInstancesProps) => {
+type PlantSpreadPositionConfig = Pick<Config,
+  "bedLengthOuter" | "bedWidthOuter" | "bedXOffset" | "bedYOffset"
+  | "columnLength" | "zGantryOffset" | "mirrorX" | "mirrorY">;
+
+export const findPlantById = (
+  plants: ThreeDGardenPlant[],
+  plantId: number,
+) => {
+  for (let index = 0; index < plants.length; index++) {
+    const plant = plants[index];
+    if (plant.id == plantId) { return plant; }
+  }
+  return undefined;
+};
+
+const PlantSpreadInstancesBase = (props: PlantSpreadInstancesProps) => {
   const {
-    config, plants, getZ, visible, dispatch, activePositionRef, spreadVisible,
+    config, plants, getZ, visible, activePositionRef, spreadVisible,
+    forceWhite,
   } = props;
   const instanceCapacity = Math.max(props.instanceCapacity || 0, plants.length);
-  const navigate = useNavigate();
   // eslint-disable-next-line no-null/no-null
-  const instancedRef = React.useRef<InstancedMeshType>(null);
+  const instancedRef = React.useRef<ThreeInstancedMesh>(null);
   const tempMatrix = React.useMemo(() => new Matrix4(), []);
   const tempPosition = React.useMemo(() => new Vector3(), []);
   const tempScale = React.useMemo(() => new Vector3(), []);
@@ -130,34 +221,85 @@ export const PlantSpreadInstances = React.memo((props: PlantSpreadInstancesProps
   const getUpdateState = () => {
     const current =
       updateStateRef.current as Partial<PlantSpreadUpdateState> | undefined;
-    if (typeof current?.needsInstanceUpdate != "boolean") {
+    if (typeof current?.needsInstanceUpdate != "boolean" ||
+      typeof current?.lastUpdateKey != "string") {
       updateStateRef.current = newPlantSpreadUpdateState();
     }
     return updateStateRef.current;
   };
-  const get3DPosition = React.useMemo(() => get3DPositionFunc(config), [config]);
+  const {
+    bedLengthOuter, bedWidthOuter, bedXOffset, bedYOffset,
+    columnLength, zGantryOffset, mirrorX, mirrorY,
+  } = config;
+  const positionConfig = React.useMemo(
+    (): PlantSpreadPositionConfig => ({
+      bedLengthOuter,
+      bedWidthOuter,
+      bedXOffset,
+      bedYOffset,
+      columnLength,
+      zGantryOffset,
+      mirrorX,
+      mirrorY,
+    }),
+    [
+      bedLengthOuter,
+      bedWidthOuter,
+      bedXOffset,
+      bedYOffset,
+      columnLength,
+      zGantryOffset,
+      mirrorX,
+      mirrorY,
+    ]);
+  const get3DPosition = React.useMemo(() =>
+    get3DPositionFunc(positionConfig as Config), [positionConfig]);
   // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/use-memo
   const boundsCenter = React.useMemo(getBoundsCenter(config), []);
   // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/use-memo
   const halfSize = React.useMemo(getHalfSize(config), []);
   const plantIndexes = React.useMemo(() =>
     plants.map((_, index) => index), [plants]);
-  const getPlantZ = React.useCallback((size: number, plant: ThreeDGardenPlant) =>
-    zZeroFunc(config)
-    + getZ(plant.x, plant.y)
-    + size / 2, [config, getZ]);
+  const zBase = React.useMemo(() =>
+    zZeroFunc(positionConfig as Config), [positionConfig]);
+  const staticInstances = React.useMemo<StaticPlantSpreadInstance[]>(() =>
+    plants.map(plant => {
+      const position = get3DPosition({ x: plant.x, y: plant.y });
+      return {
+        id: plant.id,
+        x: plant.x,
+        y: plant.y,
+        z: zBase + getZ(plant.x, plant.y),
+        positionX: position.x,
+        positionY: position.y,
+        size: plant.size,
+        spread: plant.spread,
+      };
+    }), [get3DPosition, getZ, plants, zBase]);
   const editPlantMode =
     Path.getSlug(Path.designer()) == "plants" && Path.lastChunkIsNum();
   const plantId = parseInt(Path.getSlug(Path.plants()));
-  const currentPlant =
-    plants.filter(p => p.id == plantId)[0] as ThreeDGardenPlant | undefined;
+  const currentPlant = findPlantById(plants, plantId);
   const activeDragSpread = editPlantMode
     ? currentPlant?.spread
-    : findCrop(Path.getCropSlug()).spread;
+    : findCropMetadata(Path.getCropSlug()).spread;
   const hasTransientPlant = React.useMemo(() =>
     plants.some(plant => !plant.id), [plants]);
+  const [spreadRendered, setSpreadRendered] = React.useState(spreadVisible);
+  const spreadScaleRef = React.useRef(spreadVisible ? 1 : 0);
+  const spreadVisibleRef = React.useRef(spreadVisible);
+  const [, spreadApi] = useSpring(() => ({
+    scale: spreadVisible ? 1 : 0,
+    config: spreadLayerSpringConfig,
+  }));
+  const spreadInstancesVisible =
+    spreadVisible
+    || spreadRendered
+    || editPlantMode
+    || getMode() == Mode.clickToAdd
+    || hasTransientPlant;
 
-  const ensureInstanceColor = React.useCallback((mesh: InstancedMeshType) => {
+  const ensureInstanceColor = React.useCallback((mesh: ThreeInstancedMesh) => {
     const needsResize = !mesh.instanceColor
       || mesh.instanceColor.count != instanceCapacity;
     if (needsResize) {
@@ -186,7 +328,32 @@ export const PlantSpreadInstances = React.memo((props: PlantSpreadInstancesProps
   React.useEffect(() => {
     const updateState = getUpdateState();
     updateState.needsInstanceUpdate = true;
-  }, [activeDragSpread, config, getZ, plants]);
+  }, [activeDragSpread, forceWhite, staticInstances]);
+
+  React.useEffect(() => {
+    spreadVisibleRef.current = spreadVisible;
+    if (spreadVisible) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSpreadRendered(true);
+    }
+    spreadApi.start({
+      scale: spreadVisible ? 1 : 0,
+      config: spreadLayerSpringConfig,
+      onChange: result => {
+        const value = result.value as { scale?: number };
+        spreadScaleRef.current = value.scale ?? (spreadVisible ? 1 : 0);
+        getUpdateState().needsInstanceUpdate = true;
+      },
+      onRest: () => {
+        const targetVisible = spreadVisibleRef.current;
+        spreadScaleRef.current = targetVisible ? 1 : 0;
+        getUpdateState().needsInstanceUpdate = true;
+        if (!targetVisible) {
+          setSpreadRendered(false);
+        }
+      },
+    });
+  }, [spreadApi, spreadVisible]);
 
   // eslint-disable-next-line complexity
   useFrame(state => {
@@ -194,104 +361,134 @@ export const PlantSpreadInstances = React.memo((props: PlantSpreadInstancesProps
     if (!mesh || visible === false) { return; }
     const updateState = getUpdateState();
     const clickToAddMode = getMode() == Mode.clickToAdd;
-    const spreadActive =
-      spreadVisible || editPlantMode || clickToAddMode || hasTransientPlant;
+    const spreadActive = spreadInstancesVisible
+      || editPlantMode
+      || clickToAddMode
+      || hasTransientPlant;
     if (!spreadActive && !updateState.needsInstanceUpdate) { return; }
     ensureInstanceColor(mesh);
     tempQuaternion.copy(state.camera.quaternion);
-    const worldPos = activePositionRef.current || { x: -10000, y: -10000 };
-    const activePointer = getGardenPositionFunc(config)(worldPos);
+    const spreadScale = spreadScaleRef.current;
     const active = editPlantMode
       ? {
         x: currentPlant?.x || -10000,
         y: currentPlant?.y || -10000,
       }
-      : {
-        x: activePointer.x,
-        y: activePointer.y,
-      };
-    plants.forEach((plant, index) => {
-      const spreadRadii = getSpreadRadii({
-        activeDragSpread,
-        inactiveSpread: plant.spread,
-        radius: plant.size / 2,
-      });
-      const scale = (spreadVisible || !plant.id || editPlantMode)
-        ? spreadRadii.inactive
-        : 0;
-      const position = get3DPosition({ x: plant.x, y: plant.y });
-      tempPosition.set(
-        position.x,
-        position.y,
-        getPlantZ(plant.size, plant),
-      );
-      tempScale.set(scale, scale, scale);
-      tempMatrix.compose(tempPosition, tempQuaternion, tempScale);
-      mesh.setMatrixAt(index, tempMatrix);
-      if (mesh.setColorAt) {
-        const overlap = getSpreadOverlap({
-          spreadRadii,
-          activeDragXY: {
-            x: round(active.x),
-            y: round(active.y),
-            z: 0,
-          },
-          plantXY: {
-            x: round(plant.x),
-            y: round(plant.y),
-            z: 0,
-          },
+      : getGardenPositionFunc(config)(
+        activePositionRef.current || { x: -10000, y: -10000 });
+    const activeKey = (clickToAddMode || editPlantMode)
+      ? `${round(active.x)}:${round(active.y)}`
+      : "";
+    const updateKey = [
+      spreadVisible,
+      spreadRendered,
+      Math.round(spreadScale * 1000),
+      editPlantMode,
+      clickToAddMode,
+      hasTransientPlant,
+      forceWhite,
+      plantId,
+      activeDragSpread || "",
+      activeKey,
+    ].join(":");
+    if (!updateState.needsInstanceUpdate &&
+      updateState.lastUpdateKey == updateKey) { return; }
+    perfMeasure("spreadFrameUpdateMs", () => {
+      const roundedActiveX = round(active.x);
+      const roundedActiveY = round(active.y);
+      staticInstances.forEach((plant, index) => {
+        const spreadRadii = getSpreadRadii({
+          activeDragSpread,
+          inactiveSpread: plant.spread,
+          radius: plant.size / 2,
         });
-        const color = (plant.id && (plantId != plant.id))
-          ? overlap.color.rgb
-          : [1, 1, 1];
-        const insideColor =
-          (clickToAddMode || editPlantMode) ? color : [0, 1, 0];
-        tempColor.setRGB(insideColor[0], insideColor[1], insideColor[2]);
-        mesh.setColorAt(index, tempColor);
-      }
+        const spreadLayerScale = spreadRadii.inactive * spreadScale;
+        const forcedScale = (!plant.id || editPlantMode)
+          ? spreadRadii.inactive
+          : 0;
+        const scale = Math.max(spreadLayerScale, forcedScale);
+        tempPosition.set(
+          plant.positionX,
+          plant.positionY,
+          plant.z,
+        );
+        tempScale.set(scale, scale, scale);
+        tempMatrix.compose(tempPosition, tempQuaternion, tempScale);
+        mesh.setMatrixAt(index, tempMatrix);
+        if (mesh.setColorAt) {
+          let r = 0;
+          let g = 1;
+          let b = 0;
+          if (forceWhite) {
+            r = 1;
+            g = 1;
+            b = 1;
+          } else if (clickToAddMode || editPlantMode) {
+            const overlap = getSpreadOverlap({
+              spreadRadii,
+              activeDragXY: {
+                x: roundedActiveX,
+                y: roundedActiveY,
+                z: 0,
+              },
+              plantXY: {
+                x: round(plant.x),
+                y: round(plant.y),
+                z: 0,
+              },
+            });
+            if (plant.id && plantId != plant.id) {
+              [r, g, b] = overlap.color.rgb;
+            } else {
+              r = 1;
+              g = 1;
+              b = 1;
+            }
+          }
+          tempColor.setRGB(r, g, b);
+          mesh.setColorAt(index, tempColor);
+        }
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) { mesh.instanceColor.needsUpdate = true; }
     });
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) { mesh.instanceColor.needsUpdate = true; }
     updateState.needsInstanceUpdate = false;
+    updateState.lastUpdateKey = updateKey;
   });
 
-  const onClick = (event: ThreeEvent<MouseEvent>) => {
-    const instanceId = event.instanceId;
-    if (isUndefined(instanceId)) { return; }
-    const plant = plants[instanceId];
-    if (plant?.id && dispatch && visible &&
-      ![...HOVER_OBJECT_MODES, Mode.cameraSelection].includes(getMode())) {
-      dispatch(setPanelOpen(true));
-      navigate(Path.plants(plant.id));
-    }
-  };
+  if (!spreadInstancesVisible) { return <></>; }
 
   return <InstancedMesh
+    name={"plant-spread-instances"}
     key={`plant-spread-${instanceCapacity}`}
     ref={instancedRef}
     args={[undefined, undefined, instanceCapacity]}
     count={plants.length}
     userData={{ plantIndexes }}
     visible={visible}
-    onClick={onClick}>
-    <SphereGeometry args={[1, 32, 32]} />
+    raycast={noRaycast}>
+    <SphereGeometry args={[1, ...SPREAD_SPHERE_SEGMENTS]} />
     <MeshPhongMaterial
       color={"white"}
+      side={DoubleSide}
       transparent={true}
       opacity={0.4}
       vertexColors={true}
       onBeforeCompile={(shader) => {
         shader.uniforms.uBoundsCenter = { value: boundsCenter };
         shader.uniforms.uHalfSize = { value: halfSize };
-        shader.uniforms.uOutside = { value: new Color("red") };
+        shader.uniforms.uOutside = {
+          value: new Color(forceWhite ? "white" : "red"),
+        };
         shader.uniforms.uMirrorX = { value: config.mirrorX ? -1 : 1 };
         shader.uniforms.uMirrorY = { value: config.mirrorY ? -1 : 1 };
         outOfBoundsShaderModification(shader, true);
       }}
       depthWrite={false} />
   </InstancedMesh>;
-});
+};
+
+export const PlantSpreadInstances = React.memo(PlantSpreadInstancesBase);
 
 
 export const getBoundsCenter = (config: Config) => () =>
@@ -342,8 +539,13 @@ export const outOfBoundsShaderModification =
       colorVertex,
     ).replace(
       "#include <worldpos_vertex>",
-      `#include <worldpos_vertex>
-       vWorldPosition = worldPosition.xyz;`);
+      `vec4 boundsWorldPosition = vec4(position, 1.0);
+       #ifdef USE_INSTANCING
+         boundsWorldPosition = instanceMatrix * boundsWorldPosition;
+       #endif
+       boundsWorldPosition = modelMatrix * boundsWorldPosition;
+       vWorldPosition = boundsWorldPosition.xyz;
+       #include <worldpos_vertex>`);
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <common>",
       `#include <common>

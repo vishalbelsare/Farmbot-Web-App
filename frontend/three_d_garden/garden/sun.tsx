@@ -1,23 +1,31 @@
 import React from "react";
-import { Config, getSeasonProperties, INITIAL } from "../config";
 import {
-  Vector3, DirectionalLight as ThreeDirectionalLight, Mesh,
-  MeshBasicMaterial as ThreeMeshBasicMaterial,
+  Config, getSeasonProperties, INITIAL, seasonSpringConfig,
+} from "../config";
+import {
+  Vector3, DirectionalLight as ThreeDirectionalLight, Mesh as ThreeMesh,
   Color,
-  Material,
 } from "three";
 import {
-  BufferAttribute, BufferGeometry, DirectionalLight, Group, MeshBasicMaterial,
-  Points, PointsMaterial,
+  DirectionalLight, Group, MeshBasicMaterial,
 } from "../components";
-import { Billboard, Line, Sphere, Text3D, Trail } from "@react-three/drei";
+import {
+  Billboard, Line, Sphere, Text3D, Trail,
+} from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
-import SunCalc from "suncalc";
+import { useSpring } from "@react-spring/three";
+import * as SunCalc from "suncalc";
 import { range } from "lodash";
 import moment from "moment";
 import { Season, SEASON_DURATIONS } from "../../promo/constants";
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { ASSETS, BigDistance } from "../constants";
+import { SECTION_CLIPPING_EXEMPT } from "../section";
+import {
+  Constellations, ConstellationsHandle,
+} from "../stargazing/constellations";
+import { polarToCartesian } from "./celestial_coordinates";
+import { TaggedSceneObject } from "farmbot";
 
 const shadowBias = -0.0005;
 const shadowRadius = 8;
@@ -28,6 +36,10 @@ const DAY_SECONDS = 24 * 60 * 60;
 const SUN_TIME_STEP_SECONDS = 60;
 const BELOW_HORIZON_SUN_SPEED = 10;
 const BELOW_HORIZON_SPEED_INCLINATION = -10;
+export const isSkyFullyBlack = (
+  sunFactor: number,
+  sunValue: number,
+): boolean => sunFactor * sunValue <= 0;
 const sunAnimationCache: Record<string, SunAnimationSample[]> = {};
 const SEASON_SUN_DATES: Record<string, [number, number]> = {
   [Season.Spring]: [2, 20],
@@ -39,6 +51,20 @@ const SEASON_SUN_DATES: Record<string, [number, number]> = {
 export const getCycleLength = (season: string) =>
   SEASON_DURATIONS[season] || 20;
 
+export const getSeasonAnimationElapsed = (
+  animateSeasons: boolean,
+  startTimeRef?: React.RefObject<number>,
+) => {
+  const startedAt = startTimeRef?.current;
+  if (startedAt == undefined) { return undefined; }
+  if (startedAt < 0) {
+    return -startedAt;
+  }
+  return animateSeasons
+    ? performance.now() / 1000 - startedAt
+    : undefined;
+};
+
 interface SunAnimationSample {
   animationSeconds: number;
   sunSeconds: number;
@@ -46,9 +72,33 @@ interface SunAnimationSample {
 
 export interface SunProps {
   config: Config;
+  cameraSideClipEnabled: boolean;
+  constellationDiscoveryEnabled: boolean;
+  showSun: boolean;
+  sceneObjects: TaggedSceneObject[];
   startTimeRef?: React.RefObject<number>;
-  skyRef: React.RefObject<ThreeMeshBasicMaterial | null>;
+  backgroundColor: Color;
+  onSunSetChange?(sunIsSet: boolean): void;
+  onConstellationFound?(cropSlug: string): void;
 }
+
+export const sceneObjectShadowBounds = (
+  sceneObjects: TaggedSceneObject[],
+) => sceneObjects.reduce((bounds, sceneObject) => {
+  if (!sceneObject.body.show) { return bounds; }
+  const body = sceneObject.body;
+  const xExtent = Math.abs(body.x_center) + 1000;
+  const yExtent = Math.abs(body.y_center) + 1000;
+  return Math.max(bounds, xExtent, yExtent);
+}, 0);
+
+export const refreshDirectionalLightShadow = (
+  light: ThreeDirectionalLight | null,
+) => {
+  if (!light) { return; }
+  light.shadow.camera.updateProjectionMatrix();
+  light.shadow.needsUpdate = true;
+};
 
 export const calcSunCoordinate = (
   date: Date,
@@ -57,17 +107,16 @@ export const calcSunCoordinate = (
   longitude: number,
 ) => {
   const sunPosition = SunCalc.getPosition(date, latitude, longitude);
-  const sunAzimuth = sunPosition.azimuth * (180 / Math.PI);
   return {
-    azimuth: (sunAzimuth - heading - 90 + 360) % 360,
-    inclination: sunPosition.altitude * (180 / Math.PI),
+    azimuth: (sunPosition.azimuth - heading + 90 + 360) % 360,
+    inclination: sunPosition.altitude,
   };
 };
 
 export const getAnimatedSeasonDate = (
   season: string,
   elapsedSeconds: number,
-  dayStart = moment().utc().startOf("day").toDate(),
+  dayStart?: Date,
 ) => {
   const totalCycle = getCycleLength(season);
   const clampedElapsed = Math.min(Math.max(elapsedSeconds, 0), totalCycle);
@@ -76,15 +125,43 @@ export const getAnimatedSeasonDate = (
   const totalAnimationSeconds = samples[samples.length - 1].animationSeconds;
   const targetAnimationSeconds =
     clampedElapsed / totalCycle * totalAnimationSeconds;
-  const sample = samples.find(({ animationSeconds }) =>
-    animationSeconds >= targetAnimationSeconds) || samples[samples.length - 1];
+  const sample = findSunAnimationSample(samples, targetAnimationSeconds);
   const date = new Date(seasonDayStart.getTime() + sample.sunSeconds * 1000);
   return date;
 };
 
-const getSeasonDayStart = (season: string, dayStart: Date) => {
+export const getAnimatedSeasonSunCoordinate = (
+  season: string,
+  elapsedSeconds: number,
+) => calcSunCoordinate(
+  getAnimatedSeasonDate(season, elapsedSeconds),
+  0,
+  35,
+  0,
+);
+
+const findSunAnimationSample = (
+  samples: SunAnimationSample[],
+  targetAnimationSeconds: number,
+) => {
+  let low = 0;
+  let high = samples.length - 1;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (samples[mid].animationSeconds >= targetAnimationSeconds) {
+      high = mid;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return samples[low];
+};
+
+const getSeasonDayStart = (season: string, dayStart?: Date) => {
   const seasonDate = SEASON_SUN_DATES[season];
-  if (!seasonDate) { return dayStart; }
+  if (!seasonDate) {
+    return dayStart ?? moment().utc().startOf("day").toDate();
+  }
   const [month, day] = seasonDate;
   return new Date(Date.UTC(2016, month, day));
 };
@@ -109,20 +186,6 @@ const getSunAnimationSamples = (dayStart: Date): SunAnimationSample[] => {
   return samples;
 };
 
-const toRad = (degrees: number) => degrees * Math.PI / 180;
-const polarToCartesian = (
-  radius: number,
-  thetaDegrees: number,
-  phiDegrees: number,
-): [number, number, number] => {
-  const theta = toRad(thetaDegrees);
-  const phi = toRad(phiDegrees);
-  const x = radius * Math.sin(phi) * Math.cos(theta);
-  const y = radius * Math.sin(phi) * Math.sin(theta);
-  const z = radius * Math.cos(phi);
-  return [x, y, z];
-};
-
 export const sunPosition = (
   sunInclination: number,
   sunAzimuth: number,
@@ -134,6 +197,40 @@ export const sunPosition = (
   return new Vector3(...position);
 };
 
+export const nearestEquivalentAngle = (
+  current: number,
+  target: number,
+) => target + 360 * Math.round((current - target) / 360);
+
+export const getSeasonAnimationElapsedAtSunPosition = (
+  season: string,
+  inclination: number,
+  azimuth: number,
+) => {
+  const dayStart = getSeasonDayStart(season);
+  const samples = getSunAnimationSamples(dayStart);
+  const target = sunPosition(inclination, azimuth, 1);
+  let closestSample = samples[0];
+  let closestDistance = Infinity;
+  samples.map(sample => {
+    const date = new Date(dayStart.getTime() + sample.sunSeconds * 1000);
+    const coordinate = calcSunCoordinate(date, 0, 35, 0);
+    const distance = sunPosition(
+      coordinate.inclination,
+      coordinate.azimuth,
+      1,
+    ).distanceToSquared(target);
+    if (distance < closestDistance) {
+      closestSample = sample;
+      closestDistance = distance;
+    }
+  });
+  const totalAnimationSeconds =
+    samples[samples.length - 1].animationSeconds;
+  return closestSample.animationSeconds / totalAnimationSeconds
+    * getCycleLength(season);
+};
+
 const convertColor =
   (r: number, g: number, b: number): [number, number, number] => {
     const color = new Color(r / 255, g / 255, b / 255);
@@ -141,17 +238,35 @@ const convertColor =
     return [color.r, color.g, color.b];
   };
 
-export const skyColor = (sunValue: number): [number, number, number] => {
+const BLACK_SKY_COLOR = convertColor(0, 0, 0);
+const DEFAULT_DAY_SKY_COLOR_VAL: [number, number, number] = [89, 216, 255];
+const MARS_DAY_SKY_COLOR_VAL: [number, number, number] = [184, 87, 56];
+const DAY_SKY_COLOR_VAL = (scene: string): [number, number, number] => {
+  return scene == "Mars"
+    ? MARS_DAY_SKY_COLOR_VAL
+    : DEFAULT_DAY_SKY_COLOR_VAL;
+};
+const DEFAULT_DAY_SKY_COLOR = convertColor(...DEFAULT_DAY_SKY_COLOR_VAL);
+const MARS_DAY_SKY_COLOR = convertColor(...MARS_DAY_SKY_COLOR_VAL);
+const DAY_SKY_COLOR = (scene: string) => scene == "Mars"
+  ? MARS_DAY_SKY_COLOR
+  : DEFAULT_DAY_SKY_COLOR;
+
+export const skyColor = (
+  sunValue: number,
+  scene: string,
+): [number, number, number] => {
   if (sunValue <= 0) {
-    return convertColor(0, 0, 0);
+    return BLACK_SKY_COLOR;
   }
   if (sunValue >= INITIAL.sun) {
-    return convertColor(89, 216, 255);
+    return DAY_SKY_COLOR(scene);
   }
+  const v = DAY_SKY_COLOR_VAL(scene);
   const t = sunValue / INITIAL.sun;
-  const r = Math.round(89 * t);
-  const g = Math.round(216 * t);
-  const b = Math.round(255 * t);
+  const r = Math.round(v[0] * t);
+  const g = Math.round(v[1] * t);
+  const b = Math.round(v[2] * t);
   return convertColor(r, g, b);
 };
 
@@ -175,82 +290,53 @@ export const calcSunI = (inclination: number) => {
   return 1;
 };
 
-export const Sun = (props: SunProps) => {
-  const { config } = props;
+interface AnimatedSunFrameProps extends SunProps {
+  lightRef: React.RefObject<ThreeDirectionalLight | null>;
+  debugSunRef: React.RefObject<ThreeMesh | null>;
+  sunRef: React.RefObject<ThreeMesh | null>;
+  sunFlatRef: React.RefObject<ThreeMesh | null>;
+  lineRef: React.RefObject<Line2 | null>;
+  animatedSunRef: React.MutableRefObject<SunSpringValues>;
+  sunIntensity: number;
+  setPoint: React.Dispatch<React.SetStateAction<Vector3>>;
+  setSunSky(
+    sunFactor: number,
+    sunValue: number,
+  ): void;
+}
 
-  const sunParams = getSeasonProperties(config, "Summer");
-  const { sunIntensity, sunColor } = sunParams;
+interface SunSpringValues {
+  color: string;
+  intensity: number;
+  inclination: number;
+  azimuth: number;
+}
 
-  const sunPos = sunPosition(
-    config.sunInclination,
-    config.sunAzimuth,
-    BigDistance.sunActual);
+export const AnimatedSunFrame = (props: AnimatedSunFrameProps) => {
+  const {
+    config, startTimeRef, lightRef, debugSunRef, sunRef, sunFlatRef, lineRef,
+    animatedSunRef, sunIntensity, setPoint, setSunSky,
+  } = props;
+  const updateSunPosition = () => {
+    const t = getSeasonAnimationElapsed(config.animateSeasons, startTimeRef);
+    if (t == undefined) { return; }
 
-  // eslint-disable-next-line no-null/no-null
-  const lightRef = React.useRef<ThreeDirectionalLight>(null);
-  // eslint-disable-next-line no-null/no-null
-  const debugSunRef = React.useRef<Mesh>(null);
-  // eslint-disable-next-line no-null/no-null
-  const sunRef = React.useRef<Mesh>(null);
-  // eslint-disable-next-line no-null/no-null
-  const sunFlatRef = React.useRef<Mesh>(null);
-  // eslint-disable-next-line no-null/no-null
-  const lineRef = React.useRef<Line2>(null);
-  const [point, setPoint] = React.useState<Vector3>(sunPos);
-  // eslint-disable-next-line no-null/no-null
-  const starsRef = React.useRef<Material>(null);
-  const origin = new Vector3(0, 0, 0);
-  const renderedSunFactor = calcSunI(config.sunInclination);
-  const shadowBounds = React.useMemo(() => {
-    const bedXBounds = Math.max(
-      Math.abs(config.bedXOffset),
-      Math.abs(config.bedLengthOuter - config.bedXOffset),
-    );
-    const bedYBounds = Math.max(
-      Math.abs(config.bedYOffset),
-      Math.abs(config.bedWidthOuter - config.bedYOffset),
-    );
-    const bedBounds = Math.max(bedXBounds, bedYBounds) + shadowBuffer;
-    return Math.max(bedBounds, config.botSizeX, config.botSizeY);
-  }, [
-    config.bedXOffset,
-    config.bedLengthOuter,
-    config.bedYOffset,
-    config.bedWidthOuter,
-    config.botSizeX,
-    config.botSizeY,
-  ]);
-
-  const setSunSky = (sunFactor: number, sunValue: number) => {
-    props.skyRef.current?.color?.setRGB(
-      ...skyColor(sunFactor * sunValue),
-    );
-    starsRef.current &&
-      (starsRef.current.opacity = (1 - sunFactor));
-  };
-
-  React.useEffect(() => {
-    setSunSky(renderedSunFactor, config.sun);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config.sunInclination, config.sun]);
-
-
-  useFrame(() => {
-    if (!config.animateSeasons || !props.startTimeRef) { return; }
-
-    const currentTime = performance.now() / 1000;
-    const t = currentTime - props.startTimeRef.current;
-    const date = getAnimatedSeasonDate(config.plants, t);
-    const { azimuth, inclination } = calcSunCoordinate(date, 0, 35, 0);
+    const { azimuth, inclination } =
+      getAnimatedSeasonSunCoordinate(config.plants, t);
+    animatedSunRef.current = {
+      ...animatedSunRef.current,
+      azimuth,
+      inclination,
+    };
     const sunFactor = calcSunI(inclination);
     const position = sunPosition(inclination, azimuth, BigDistance.sunActual);
 
     setSunSky(sunFactor, config.sun);
 
-    if (lightRef.current) {
-      lightRef.current.position?.set(position.x, position.y, position.z);
-      lightRef.current.intensity =
-        sunIntensity * config.sun / 100 * sunFactor;
+    const light = lightRef.current;
+    if (light) {
+      light.position?.set(position.x, position.y, position.z);
+      light.intensity = sunIntensity * config.sun / 100 * sunFactor;
     }
 
     debugSunRef.current?.position.set(position.x, position.y, position.z);
@@ -263,89 +349,291 @@ export const Sun = (props: SunProps) => {
     if (lineRef.current) {
       setPoint(position);
     }
-  });
+  };
 
-  return <Group name={"sun"}>
-    <DirectionalLight
-      ref={lightRef}
-      intensity={sunIntensity * config.sun / 100 * renderedSunFactor}
-      color={sunColor}
-      castShadow={!config.lowDetail}
-      shadow-bias={shadowBias}
-      shadow-radius={shadowRadius}
-      shadow-blurSamples={shadowBlurSamples}
-      shadow-mapSize-width={1024}
-      shadow-mapSize-height={1024}
-      shadow-camera-near={1}
-      shadow-camera-far={BigDistance.sunAffect}
-      shadow-camera-left={-shadowBounds}
-      shadow-camera-right={shadowBounds}
-      shadow-camera-top={shadowBounds}
-      shadow-camera-bottom={-shadowBounds}
-      position={sunPos}
-    />
-    {config.lightsDebug &&
-      <Line ref={lineRef} points={[point, origin]} color={SUN_COLOR} />}
-    {config.lightsDebug &&
-      <Trail width={1000} color={"yellow"} length={100} attenuation={t => t}>
-        <Sphere
-          ref={debugSunRef}
-          args={[500, 16, 16]}
-          position={sunPos}>
-          <MeshBasicMaterial color={SUN_COLOR} />
-        </Sphere>
-      </Trail>}
-    <Sphere
-      ref={sunRef}
-      args={[1000, 32, 32]}
-      position={sunPosition(
-        config.sunInclination,
-        config.sunAzimuth,
-        BigDistance.sunVisual)}>
-      <MeshBasicMaterial color={SUN_COLOR} />
-    </Sphere>
-    <OtherSuns starsRef={starsRef} />
-    {config.lightsDebug && <SkyGrid config={config} />}
-    {config.lightsDebug && <Sphere
-      ref={sunFlatRef}
-      args={[500, 8, 8]}
-      position={sunPosition(0, config.sunAzimuth, BigDistance.ground)}>
-      <MeshBasicMaterial color={SUN_COLOR} />
-    </Sphere>}
+  React.useLayoutEffect(updateSunPosition);
+  useFrame(updateSunPosition);
+
+  return undefined;
+};
+
+const SunBase = (props: SunProps) => {
+  const { config } = props;
+
+  const sunParams = getSeasonProperties(config, "Summer");
+  const { sunIntensity, sunColor, sunInclination: seasonSunInclination } =
+    sunParams;
+  const targetSunInclination = config.sunInclination == INITIAL.sunInclination
+    ? seasonSunInclination
+    : config.sunInclination;
+  const targetSunAzimuth = config.sunAzimuth;
+  const [initialSunColor] = React.useState(sunColor);
+  const [renderedSunIntensity, setRenderedSunIntensity] =
+    React.useState(sunIntensity);
+  const [renderedSunInclination, setRenderedSunInclination] =
+    React.useState(targetSunInclination);
+  const [renderedSunAzimuth, setRenderedSunAzimuth] =
+    React.useState(targetSunAzimuth);
+  const renderedSunAzimuthRef = React.useRef(targetSunAzimuth);
+
+  const sunPos = sunPosition(
+    renderedSunInclination,
+    renderedSunAzimuth,
+    BigDistance.sunActual);
+
+  // eslint-disable-next-line no-null/no-null
+  const lightRef = React.useRef<ThreeDirectionalLight>(null);
+  // eslint-disable-next-line no-null/no-null
+  const debugSunRef = React.useRef<ThreeMesh>(null);
+  // eslint-disable-next-line no-null/no-null
+  const sunRef = React.useRef<ThreeMesh>(null);
+  // eslint-disable-next-line no-null/no-null
+  const sunFlatRef = React.useRef<ThreeMesh>(null);
+  // eslint-disable-next-line no-null/no-null
+  const lineRef = React.useRef<Line2>(null);
+  const [point, setPoint] = React.useState<Vector3>(sunPos);
+  // eslint-disable-next-line no-null/no-null
+  const constellationsRef = React.useRef<ConstellationsHandle>(null);
+  const origin = new Vector3(0, 0, 0);
+  const renderedSunFactor = calcSunI(renderedSunInclination);
+  const showStarField =
+    renderedSunFactor < 1 || !!props.startTimeRef;
+  const sunIsSetRef = React.useRef<boolean | undefined>(undefined);
+  const shadowBounds = React.useMemo(() => {
+    const bedXBounds = Math.max(
+      Math.abs(config.bedXOffset),
+      Math.abs(config.bedLengthOuter - config.bedXOffset),
+    );
+    const bedYBounds = Math.max(
+      Math.abs(config.bedYOffset),
+      Math.abs(config.bedWidthOuter - config.bedYOffset),
+    );
+    const bedBounds = Math.max(bedXBounds, bedYBounds) + shadowBuffer;
+    const sceneObjectBounds = sceneObjectShadowBounds(props.sceneObjects)
+      + shadowBuffer;
+    return Math.max(
+      bedBounds,
+      sceneObjectBounds,
+      config.botSizeX,
+      config.botSizeY,
+    );
+  }, [
+    config.bedXOffset,
+    config.bedLengthOuter,
+    config.bedYOffset,
+    config.bedWidthOuter,
+    config.botSizeX,
+    config.botSizeY,
+    props.sceneObjects,
+  ]);
+  React.useLayoutEffect(() => {
+    refreshDirectionalLightShadow(lightRef.current);
+  }, [shadowBounds]);
+
+  const setSunSky = (
+    sunFactor: number,
+    sunValue: number,
+  ) => {
+    const skySunValue = sunFactor * sunValue;
+    props.backgroundColor.setRGB(
+      ...skyColor(skySunValue, config.scene),
+    );
+    constellationsRef.current?.setNightFactor(1 - sunFactor);
+    const nextSunIsSet = isSkyFullyBlack(sunFactor, sunValue);
+    if (sunIsSetRef.current != nextSunIsSet) {
+      sunIsSetRef.current = nextSunIsSet;
+      props.onSunSetChange?.(nextSunIsSet);
+    }
+  };
+
+  const sunSpringTargets = React.useMemo(() => ({
+    color: sunColor,
+    intensity: sunIntensity,
+    inclination: targetSunInclination,
+    azimuth: targetSunAzimuth,
+  }), [sunColor, sunIntensity, targetSunAzimuth, targetSunInclination]);
+  const animatedSunRef = React.useRef<SunSpringValues>(sunSpringTargets);
+  const lastSeasonAnimationActive = React.useRef(false);
+  const setSunSpringValues = React.useCallback((
+    value: Partial<SunSpringValues>,
+  ) => {
+    value.color && lightRef.current?.color?.set(value.color);
+    typeof value.intensity == "number" &&
+      setRenderedSunIntensity(value.intensity);
+    typeof value.inclination == "number" &&
+      setRenderedSunInclination(value.inclination);
+    if (typeof value.azimuth == "number") {
+      renderedSunAzimuthRef.current = value.azimuth;
+      setRenderedSunAzimuth(value.azimuth);
+    }
+  }, []);
+  const [, sunSpringApi] = useSpring(() => sunSpringTargets);
+
+  React.useLayoutEffect(() => {
+    const seasonAnimationActive =
+      getSeasonAnimationElapsed(config.animateSeasons, props.startTimeRef)
+      != undefined;
+    const fromAnimatedSun =
+      lastSeasonAnimationActive.current && !seasonAnimationActive
+        ? animatedSunRef.current
+        : undefined;
+    lastSeasonAnimationActive.current = seasonAnimationActive;
+    fromAnimatedSun && setSunSpringValues(fromAnimatedSun);
+    const continuousSunSpringTargets = {
+      ...sunSpringTargets,
+      azimuth: nearestEquivalentAngle(
+        fromAnimatedSun?.azimuth ?? renderedSunAzimuthRef.current,
+        targetSunAzimuth,
+      ),
+    };
+    sunSpringApi.start({
+      from: fromAnimatedSun,
+      to: continuousSunSpringTargets,
+      immediate: !config.animate,
+      onChange: result => {
+        const value = result.value as Partial<SunSpringValues>;
+        setSunSpringValues(value);
+      },
+      onRest: () => setSunSpringValues(continuousSunSpringTargets),
+      config: seasonSpringConfig,
+    });
+  }, [
+    config.animate,
+    config.animateSeasons,
+    props.startTimeRef,
+    setSunSpringValues,
+    sunColor,
+    sunIntensity,
+    sunSpringApi,
+    sunSpringTargets,
+    targetSunAzimuth,
+    targetSunInclination,
+  ]);
+
+  React.useEffect(() => {
+    if (getSeasonAnimationElapsed(config.animateSeasons, props.startTimeRef)
+      != undefined) {
+      return;
+    }
+    setSunSky(renderedSunFactor, config.sun);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    config.animateSeasons,
+    config.sun,
+    props.startTimeRef,
+    renderedSunFactor,
+    renderedSunInclination,
+  ]);
+
+  return <Group name={"sun"}
+    userData={{ [SECTION_CLIPPING_EXEMPT]: true }}>
+    {props.startTimeRef &&
+      <AnimatedSunFrame
+        {...props}
+        lightRef={lightRef}
+        debugSunRef={debugSunRef}
+        sunRef={sunRef}
+        sunFlatRef={sunFlatRef}
+        lineRef={lineRef}
+        animatedSunRef={animatedSunRef}
+        sunIntensity={renderedSunIntensity}
+        setPoint={setPoint}
+        setSunSky={setSunSky} />}
+    <Group name={"sun-visuals"} visible={props.showSun}>
+      <DirectionalLight
+        ref={lightRef}
+        intensity={renderedSunIntensity * config.sun / 100 * renderedSunFactor}
+        color={initialSunColor}
+        castShadow={!config.lowDetail}
+        shadow-bias={shadowBias}
+        shadow-radius={shadowRadius}
+        shadow-blurSamples={shadowBlurSamples}
+        shadow-mapSize-width={1024}
+        shadow-mapSize-height={1024}
+        shadow-camera-near={1}
+        shadow-camera-far={BigDistance.sunAffect}
+        shadow-camera-left={-shadowBounds}
+        shadow-camera-right={shadowBounds}
+        shadow-camera-top={shadowBounds}
+        shadow-camera-bottom={-shadowBounds}
+        position={sunPos}
+      />
+      {config.lightsDebug &&
+        <Line ref={lineRef} points={[point, origin]} color={SUN_COLOR} />}
+      {config.lightsDebug &&
+        <Trail width={1000} color={"yellow"} length={100} attenuation={t => t}>
+          <Sphere
+            ref={debugSunRef}
+            args={[500, 16, 16]}
+            position={sunPos}>
+            <MeshBasicMaterial color={SUN_COLOR} />
+          </Sphere>
+        </Trail>}
+      <Sphere
+        name={"sun-visual"}
+        ref={sunRef}
+        args={[1000, 32, 32]}
+        position={sunPosition(
+          renderedSunInclination,
+          renderedSunAzimuth,
+          BigDistance.sunVisual)}>
+        <MeshBasicMaterial color={SUN_COLOR} />
+      </Sphere>
+      {config.lightsDebug && <SkyGrid config={config} />}
+      {config.lightsDebug && <Sphere
+        ref={sunFlatRef}
+        args={[500, 8, 8]}
+        position={sunPosition(0, renderedSunAzimuth, BigDistance.ground)}>
+        <MeshBasicMaterial color={SUN_COLOR} />
+      </Sphere>}
+    </Group>
+    {showStarField &&
+      <React.Suspense fallback={undefined}>
+        <Constellations
+          ref={constellationsRef}
+          enabled={config.constellations
+            || props.constellationDiscoveryEnabled}
+          debug={config.constellationsDebug}
+          cameraSideClipEnabled={props.cameraSideClipEnabled}
+          discoveryEnabled={props.constellationDiscoveryEnabled}
+          onConstellationFound={props.onConstellationFound}
+          nightFactor={1 - renderedSunFactor} />
+      </React.Suspense>}
   </Group>;
 };
 
-const generateOtherSuns = () => {
-  const points = [];
-  const maxPhi = 80;
-  const r = BigDistance.sunVisual;
-  for (let i = 0; i < 1000; i++) {
-    const theta = Math.random() * 360;
-    const phi = Math.random() * maxPhi;
-    const position = polarToCartesian(r, theta, phi);
-    points.push(...position);
-  }
-  return new Float32Array(points);
-};
+const SUN_CONFIG_FIELDS: (keyof Config)[] = [
+  "animateSeasons",
+  "bedLengthOuter",
+  "bedWidthOuter",
+  "bedXOffset",
+  "bedYOffset",
+  "botSizeX",
+  "botSizeY",
+  "constellations",
+  "constellationsDebug",
+  "lightsDebug",
+  "lowDetail",
+  "plants",
+  "sun",
+  "sunAzimuth",
+  "sunInclination",
+];
 
-const OtherSuns = ({ starsRef }: { starsRef: React.RefObject<Material | null> }) => {
-  const positions = React.useMemo(() => generateOtherSuns(), []);
-  return <Points>
-    <BufferGeometry>
-      <BufferAttribute
-        attach={"attributes-position"}
-        args={[positions, 3]} />
-    </BufferGeometry>
-    <PointsMaterial
-      ref={starsRef}
-      color={"white"}
-      size={1}
-      sizeAttenuation={false}
-      transparent={true}
-      opacity={1}
-      depthWrite={false} />
-  </Points>;
-};
+export const sunPropsEqual = (prev: SunProps, next: SunProps) =>
+  prev.backgroundColor === next.backgroundColor
+  && prev.sceneObjects === next.sceneObjects
+  && prev.cameraSideClipEnabled === next.cameraSideClipEnabled
+  && prev.constellationDiscoveryEnabled
+  === next.constellationDiscoveryEnabled
+  && prev.showSun === next.showSun
+  && prev.startTimeRef === next.startTimeRef
+  && prev.onSunSetChange === next.onSunSetChange
+  && prev.onConstellationFound === next.onConstellationFound
+  && SUN_CONFIG_FIELDS.every(field =>
+    prev.config[field] === next.config[field]);
+
+export const Sun = React.memo(SunBase, sunPropsEqual);
 
 interface SkyGridProps {
   config: Config;
